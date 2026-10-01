@@ -14,6 +14,8 @@ import {
   paperOpenMessage,
   paperPartialMessage,
   paperCloseMessage,
+  paperStartMessage,
+  paperStopMessage,
   type TokenContext,
 } from "../telegram";
 
@@ -49,6 +51,8 @@ export class LivePaperLoop {
 
   private running = false;
   private lastProcessedCandle = "";
+  private startedAt: string | null = null;
+  private stopReason = "loop ended";
 
   constructor(
     private readonly config: LivePaperConfig,
@@ -95,6 +99,29 @@ export class LivePaperLoop {
     console.log(`Interval: ${CANDLE_INTERVAL}`);
     console.log();
 
+    this.startedAt = new Date().toISOString();
+    this.stopReason = "loop ended";
+    const snap = this.account.snapshot();
+    await telegram(
+      paperStartMessage({
+        token: this.token,
+        mode: "paper-jupiter",
+        interval: CANDLE_INTERVAL,
+        pollMs: this.config.pollMs,
+        balanceSol: snap.solBalance,
+        realizedPnlSol: snap.realizedPnlSol,
+        riskPerTradePct: this.config.riskPerTradePct,
+        minPositionSol: this.config.minPositionSol,
+        maxPositionSol: this.config.maxPositionSol,
+        targets: this.config.targets.map((t) => ({ ...t })),
+        resumed: (this.lastProcessedCandle ?? "") !== "" || this.strategyPosition !== null,
+        openPositionSol: this.strategyPosition?.remainingSizeSol ?? snap.position?.remainingSizeSol ?? null,
+        startedAt: this.startedAt,
+      }),
+    )
+      .then(() => console.log("Telegram start report sent"))
+      .catch((e) => console.error("Telegram start report failed:", e));
+
     while (this.running) {
       try {
         await this.tick();
@@ -103,10 +130,37 @@ export class LivePaperLoop {
       }
       await Bun.sleep(this.config.pollMs);
     }
+
+    await this.sendStopReport();
   }
 
-  stop(): void {
+  stop(reason = "signal"): void {
+    this.stopReason = reason;
     this.running = false;
+  }
+
+  private async sendStopReport(): Promise<void> {
+    const stoppedAt = new Date().toISOString();
+    const snap = this.account.snapshot();
+    const stats = this.store.state.stats;
+    await telegram(
+      paperStopMessage({
+        token: this.token,
+        reason: this.stopReason,
+        startedAt: this.startedAt,
+        stoppedAt,
+        balanceSol: snap.solBalance,
+        realizedPnlSol: snap.realizedPnlSol,
+        openPositionSol:
+          this.strategyPosition?.remainingSizeSol ?? snap.position?.remainingSizeSol ?? null,
+        lastCandle: this.lastProcessedCandle || null,
+        trades: stats.trades,
+        wins: stats.wins,
+        losses: stats.losses,
+      }),
+    )
+      .then(() => console.log("Telegram stop report sent"))
+      .catch((e) => console.error("Telegram stop report failed:", e));
   }
 
   get snapshot() {

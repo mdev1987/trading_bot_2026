@@ -24,8 +24,13 @@ const loop = new LivePaperLoop(
 );
 
 process.on("SIGINT", () => {
-  console.log("\nStopping paper trader...");
-  loop.stop();
+  console.log("\nStopping paper trader (SIGINT)...");
+  loop.stop("SIGINT");
+});
+
+process.on("SIGTERM", () => {
+  console.log("\nStopping paper trader (SIGTERM)...");
+  loop.stop("SIGTERM");
 });
 
 await loop.start();

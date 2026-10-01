@@ -180,6 +180,72 @@ export function paperPartialMessage(r: PartialReport): string {
   );
 }
 
+export interface StartReport {
+  token: TokenContext;
+  mode: string;
+  interval: string;
+  pollMs: number;
+  balanceSol: number;
+  realizedPnlSol: number;
+  riskPerTradePct: number;
+  minPositionSol: number;
+  maxPositionSol: number;
+  targets: { id: string; profitPct: number; sellFraction: number }[];
+  resumed: boolean;
+  openPositionSol: number | null;
+  startedAt: string;
+}
+
+export interface StopReport {
+  token: TokenContext | null;
+  reason: string;
+  startedAt: string | null;
+  stoppedAt: string;
+  balanceSol: number;
+  realizedPnlSol: number;
+  openPositionSol: number | null;
+  lastCandle: string | null;
+  trades: number;
+  wins: number;
+  losses: number;
+}
+
+export function paperStartMessage(r: StartReport): string {
+  const targets = r.targets.map((t) => `${t.id} +${t.profitPct}% ×${Math.round(t.sellFraction * 100)}%`).join(" | ");
+  return (
+    `🚀 PAPER BOT STARTED — ${r.token.symbol}\n\n` +
+    tokenBlock(r.token) +
+    `\n\n⚙️ Mode: ${r.mode} — _no transaction sent, paper only_` +
+    `\n📊 Interval: ${r.interval} | 🔄 Poll: ${(r.pollMs / 1000).toFixed(0)}s` +
+    `\n💰 Balance: ${fmtSol(r.balanceSol)} SOL | 📈 Realized: ${fmtSigned(r.realizedPnlSol)} SOL` +
+    `\n⚖️ Risk: ${r.riskPerTradePct.toFixed(2)}% | 📦 Size: ${fmtSol(r.minPositionSol)}–${fmtSol(r.maxPositionSol)} SOL` +
+    `\n🎯 Targets: ${targets}` +
+    `\n♻️ State: ${r.resumed ? "resumed from disk" : "fresh boot"}` +
+    (r.openPositionSol != null ? `\n📦 Open position: ${fmtSol(r.openPositionSol)} SOL` : "") +
+    `\n\n📅 Started: ${r.startedAt}`
+  );
+}
+
+export function paperStopMessage(r: StopReport): string {
+  const label = r.token ? ` — ${r.token.symbol}` : "";
+  const uptime =
+    r.startedAt != null ? formatDuration(Date.parse(r.stoppedAt) - Date.parse(r.startedAt)) : "n/a";
+  const total = r.wins + r.losses;
+  const winRate = total > 0 ? (r.wins / total) * 100 : 0;
+  return (
+    `🛑 PAPER BOT STOPPED${label}\n\n` +
+    (r.token ? tokenBlock(r.token) + `\n\n` : "") +
+    `📝 Reason: ${r.reason}` +
+    `\n⏱️ Uptime: ${uptime}` +
+    `\n💰 Balance: ${fmtSol(r.balanceSol)} SOL | 📈 Realized: ${fmtSigned(r.realizedPnlSol)} SOL` +
+    `\n📦 Open position: ${r.openPositionSol != null ? `${fmtSol(r.openPositionSol)} SOL` : "none"}` +
+    `\n🕯️ Last candle: ${r.lastCandle ?? "n/a"}` +
+    `\n🏆 Session: ${r.trades} trades | Win rate: ${winRate.toFixed(1)}% (${r.wins}W/${r.losses}L)` +
+    `\n\n📅 Stopped: ${r.stoppedAt}` +
+    `\n\n_paper only — no funds moved_`
+  );
+}
+
 export function paperCloseMessage(r: CloseReport): string {
   const icon = r.won ? "💰" : "🔴";
   const total = r.wins + r.losses;
