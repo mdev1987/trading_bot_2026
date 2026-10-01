@@ -18,13 +18,14 @@ export interface ExecutionConfig {
   slippageBps: number;
 
   /**
-   * Liquidity-impact model.
+   * Liquidity-impact model (≈100 bps per 1% of pool for constant-product
+   * pools: out = y·dx/(x+dx), so effective/spot ≈ x/(x+dx) ≈ 1 − dx/x).
    *
    * Example:
-   * liquidityImpactBpsPerPct = 10
+   * liquidityImpactBpsPerPct = 100
    *
    * If the trade is 1% of available liquidity,
-   * the model adds 10 bps of impact.
+   * the model adds ~100 bps of impact.
    */
   liquidityImpactBpsPerPct: number;
 

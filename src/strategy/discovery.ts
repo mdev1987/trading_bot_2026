@@ -111,8 +111,16 @@ export function classifyPhase3(
     return null;
   }
 
-  // Phase 3 has no market-cap rule in the SRT discovery section.
-  // No maximum age, no artificial $10M ceiling.
+  // SRT 03:07:31: Phase 3 discovery caps market cap at $10M.
+  // (The "no maximum" remark in the transcript is about pair AGE, not cap.)
+  // marketCapUsd stays null until a real market-cap source exists — same
+  // honesty rule as Phase 2, so this currently rejects, by design.
+  if (
+    rules.maxMarketCapUsd !== undefined &&
+    (token.marketCapUsd === null || token.marketCapUsd > rules.maxMarketCapUsd)
+  ) {
+    return null;
+  }
 
   return {
     phase: "phase3",
