@@ -124,6 +124,8 @@ export interface CloseReport {
   losses: number;
   realizedPnlSol: number;
   router: string | null;
+  /** Optional signal-vs-execution note, e.g. quoted amounts vs signal prices. */
+  executionNote?: string;
 }
 
 const fmtSol = (v: number, dp = 4): string => v.toFixed(dp);
@@ -193,6 +195,7 @@ export function paperCloseMessage(r: CloseReport): string {
     `\n🏆 Win rate: ${winRate.toFixed(1)}% (${r.wins}W/${r.losses}L of ${total})` +
     `\n📈 Realized total: ${fmtSigned(r.realizedPnlSol)} SOL` +
     `\n🔀 Router: ${r.router ?? "n/a"}` +
+    (r.executionNote ? `\n⚖️ ${r.executionNote}` : "") +
     `\n\n_no transaction sent — paper only_`
   );
 }

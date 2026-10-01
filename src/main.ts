@@ -4,6 +4,7 @@ import { runBacktest } from "./backtest/engine";
 import { printBacktestReport } from "./backtest/report";
 import type { BacktestConfig } from "./backtest/types";
 import type { CandidateToken } from "./models";
+import { strategyConfig, tradingConfig } from "./config";
 
 const paprika = new DexPaprikaData();
 
@@ -11,19 +12,16 @@ const POOL_ADDRESS = "zxTpi4BtaWX3mgdAPoezkMD1hxx8CdeCfrqXMWvSCLX";
 const TOKEN_ADDRESS = "6GmAFSYs4gk3FDao5FzzySQpPZaWsa4rUJHacpMpUNgx";
 
 const backtestConfig: BacktestConfig = {
-  startingBalanceSol: 1.0,
-  riskPerTradePct: 1.0,
-  minPositionSol: 0.02,
-  maxPositionSol: 0.1,
-  swingLookback: 3,
-  levelTolerancePct: 0.75,
-  supportTolerancePct: 1.0,
-  breakoutPct: 0.25,
-  analysisWindowCandles: 672,
-  targets: [
-    { id: "tp1", profitPct: 25, sellFraction: 0.25 },
-    { id: "tp2", profitPct: 50, sellFraction: 0.5 },
-  ],
+  startingBalanceSol: tradingConfig.accountBalanceSol,
+  riskPerTradePct: tradingConfig.riskPerTradePct,
+  minPositionSol: tradingConfig.minPositionSol,
+  maxPositionSol: tradingConfig.maxPositionSol,
+  swingLookback: strategyConfig.swingLookback,
+  levelTolerancePct: strategyConfig.levelTolerancePct,
+  supportTolerancePct: strategyConfig.supportTolerancePct,
+  breakoutPct: strategyConfig.breakoutPct,
+  analysisWindowCandles: strategyConfig.analysisWindowCandles,
+  targets: strategyConfig.targets.map((t) => ({ ...t })),
 };
 
 async function main() {

@@ -41,17 +41,29 @@ export function runBacktest(
   }
 
   let balance = config.startingBalanceSol;
-  let peakBalance = balance;
+  let peakEquity = balance;
   let maxDrawdownSol = 0;
   let maxDrawdownPct = 0;
 
+  // Mark-to-market equity: settled balance + open position value.
+  // Without this, drawdown ignores unrealized losses while in a trade.
+  const equity = () => {
+    if (position !== null && activeTrade !== null && activeTrade.entryPrice > 0) {
+      const last = candles[candleIndex]!;
+      const mtm = position.remainingSizeSol * (last.close / activeTrade.entryPrice);
+      return balance + mtm;
+    }
+    return balance;
+  };
+
   const trackDrawdown = () => {
-    if (balance > peakBalance) {
-      peakBalance = balance;
+    const eq = equity();
+    if (eq > peakEquity) {
+      peakEquity = eq;
       return;
     }
-    const ddSol = peakBalance - balance;
-    const ddPct = peakBalance > 0 ? (ddSol / peakBalance) * 100 : 0;
+    const ddSol = peakEquity - eq;
+    const ddPct = peakEquity > 0 ? (ddSol / peakEquity) * 100 : 0;
     if (ddSol > maxDrawdownSol) maxDrawdownSol = ddSol;
     if (ddPct > maxDrawdownPct) maxDrawdownPct = ddPct;
   };
@@ -59,8 +71,12 @@ export function runBacktest(
   let position: Position | null = null;
   let activeTrade: BacktestTrade | null = null;
   const trades: BacktestTrade[] = [];
+  let candleIndex = 0;
+  let exitedThisCandle = false;
 
   for (let i = 0; i < candles.length; i++) {
+    candleIndex = i;
+    exitedThisCandle = false;
     const candle = candles[i]!;
 
     /*
@@ -80,13 +96,15 @@ export function runBacktest(
     const analysis = analyzeMarket(window, currentPrice, config.swingLookback, config.levelTolerancePct);
 
     /*
-     * EXISTING POSITION
-     * managePosition checks hard stop BEFORE profit targets,
-     * so a candle touching both resolves conservatively as STOP first.
+     * EXISTING POSITION (full OHLC bar: stop-first on intrabar ambiguity).
      */
     if (position !== null && activeTrade !== null) {
       const trade = activeTrade;
-      const update = managePosition(position, currentPrice, analysis);
+      const update = managePosition(
+        position,
+        { price: candle.close, high: candle.high, low: candle.low },
+        analysis,
+      );
       position = update.position;
 
       trade.maxPrice = Math.max(trade.maxPrice, candle.high);
@@ -117,6 +135,7 @@ export function runBacktest(
           trades.push(trade);
           activeTrade = null;
           position = null;
+          exitedThisCandle = true;
         }
 
         // stop-moved: no balance change.
@@ -124,9 +143,9 @@ export function runBacktest(
     }
 
     /*
-     * NO POSITION → SEARCH FOR ENTRY
+     * NO POSITION → SEARCH FOR ENTRY (never re-enter on an exit candle).
      */
-    if (position === null && activeTrade === null) {
+    if (position === null && activeTrade === null && !exitedThisCandle) {
       const setup = detectSetup(analysis, {
         supportTolerancePct: config.supportTolerancePct,
         breakoutPct: config.breakoutPct,
@@ -171,6 +190,7 @@ export function runBacktest(
         positionSol: entry.positionSol,
         stopPrice: entry.stopPrice,
         targets,
+        openedAt: candle.timeClose,
       });
 
       activeTrade = {
@@ -218,8 +238,13 @@ export function runBacktest(
           ? (activeTrade.pnlSol / activeTrade.positionSol) * 100
           : 0;
       trades.push(activeTrade);
+      activeTrade = null;
+      position = null;
     }
   }
+
+  // The forced exit changed equity: track it before finalizing.
+  trackDrawdown();
 
   const winningTrades = trades.filter((t) => t.pnlSol > 0).length;
   const losingTrades = trades.filter((t) => t.pnlSol < 0).length;

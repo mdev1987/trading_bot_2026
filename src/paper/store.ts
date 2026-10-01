@@ -3,23 +3,31 @@ import { dirname } from "node:path";
 import { Low } from "lowdb";
 import { JSONFile } from "lowdb/node";
 import { DuckDBInstance, type DuckDBConnection } from "@duckdb/node-api";
-import type { PaperPosition } from "./account";
+import type { PaperPosition, PaperTrade } from "./account";
 import type { Position as StrategyPosition } from "../strategy/position";
 
-export interface SerializedPaperPosition extends Omit<PaperPosition, "tokenAmountRaw"> {
+export interface SerializedPaperPosition extends Omit<PaperPosition, "tokenAmountRaw" | "originalTokenAmountRaw"> {
+  tokenAmountRaw: string;
+  originalTokenAmountRaw: string;
+}
+
+export interface SerializedPaperTrade extends Omit<PaperTrade, "tokenAmountRaw"> {
   tokenAmountRaw: string;
 }
 
 export interface PersistedState {
+  version: 1;
   balanceSol: number;
   realizedPnlSol: number;
   paperPosition: SerializedPaperPosition | null;
   strategyPosition: StrategyPosition | null;
+  trades: SerializedPaperTrade[];
   stats: { trades: number; wins: number; losses: number };
   lastProcessedCandle: string;
 }
 
 export interface LedgerRow {
+  eventId: string;
   time: string;
   side: "buy" | "sell";
   tradeNo: number;
@@ -41,10 +49,12 @@ export interface LedgerRow {
 }
 
 const DEFAULT_STATE: PersistedState = {
+  version: 1,
   balanceSol: 1.0,
   realizedPnlSol: 0,
   paperPosition: null,
   strategyPosition: null,
+  trades: [],
   stats: { trades: 0, wins: 0, losses: 0 },
   lastProcessedCandle: "",
 };
@@ -71,11 +81,16 @@ export class PaperStore {
   async init(): Promise<PersistedState> {
     await this.db.read();
     this.db.data ||= structuredClone(DEFAULT_STATE);
+    if (this.db.data.version !== 1) {
+      throw new Error(
+        `Unsupported paper-state version ${JSON.stringify((this.db.data as { version?: unknown }).version)} (expected 1). Delete ${this.stateFile} to start fresh.`,
+      );
+    }
     this.duck = await DuckDBInstance.create(this.ledgerFile);
     this.conn = await this.duck.connect();
     await this.conn.run(`
       CREATE TABLE IF NOT EXISTS paper_trades(
-        time TEXT, side TEXT, trade_no INTEGER,
+        event_id TEXT UNIQUE, time TEXT, side TEXT, trade_no INTEGER,
         token_mint TEXT, token_symbol TEXT, pool_address TEXT, dex TEXT, chain TEXT,
         requested_sol DOUBLE, actual_sol DOUBLE, token_amount_raw TEXT,
         market_price_usd DOUBLE, router TEXT, price_impact_pct DOUBLE,
@@ -98,6 +113,7 @@ export class PaperStore {
     if (!this.conn) throw new Error("PaperStore not initialised");
     await this.conn.run(
       `INSERT INTO paper_trades VALUES (${[
+        str(row.eventId),
         str(row.time),
         str(row.side),
         num(row.tradeNo),

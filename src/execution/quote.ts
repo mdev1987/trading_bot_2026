@@ -1,14 +1,14 @@
-import { JupiterQuotes, SOL_DECIMALS, SOL_MINT } from "./jupiter";
+import type { JupiterPaperBroker, JupiterPaperQuote } from "./jupiter-paper";
+import { SOL_MINT, SOL_DECIMALS } from "./jupiter-mints";
 import { effectiveRate, type ExecutionQuote, type QuoteSide } from "./types";
 
 /**
  * Endpoint-independent quote facade. Strategy/paper code depends on
  * this, not on a specific Jupiter path (/swap/v2 vs /ultra).
- * The transport (JupiterQuotes today) is injected.
+ * The transport (JupiterPaperBroker today) is injected.
  */
 export interface QuoteTransport {
-  quoteBuy(solAmount: number, tokenMint: string, taker?: string): Promise<TransportQuote>;
-  quoteSell(tokenAmountSmallest: string | bigint, tokenMint: string, taker?: string): Promise<TransportQuote>;
+  quote(inputMint: string, outputMint: string, amount: bigint): Promise<JupiterPaperQuote>;
 }
 
 export interface TransportQuote {
@@ -22,9 +22,15 @@ export interface TransportQuote {
   requestId: string;
 }
 
-const JupiterTransport = (client: JupiterQuotes): QuoteTransport => ({
-  quoteBuy: (sol, mint, taker) => client.quoteBuy(sol, mint, taker),
-  quoteSell: (amount, mint, taker) => client.quoteSell(amount, mint, taker),
+const toTransportQuote = (side: QuoteSide, q: JupiterPaperQuote): TransportQuote => ({
+  side,
+  inputMint: q.inputMint,
+  outputMint: q.outputMint,
+  inputAmount: q.inAmount,
+  outputAmount: q.outAmount,
+  priceImpactPct: q.priceImpactPct,
+  router: q.router,
+  requestId: q.requestId,
 });
 
 export class PaperQuotes {
@@ -33,8 +39,18 @@ export class PaperQuotes {
     private readonly endpoint: string,
   ) {}
 
-  static jupiter(client: JupiterQuotes): PaperQuotes {
-    return new PaperQuotes(JupiterTransport(client), "jupiter-swap-v2");
+  static jupiter(broker: JupiterPaperBroker): PaperQuotes {
+    return new PaperQuotes(
+      {
+        quote: (inputMint, outputMint, amount) => broker.quote(inputMint, outputMint, amount),
+      },
+      "jupiter-swap-v2",
+    );
+  }
+
+  private static lamports(sol: number): bigint {
+    if (!Number.isFinite(sol) || sol <= 0) throw new Error("sol must be > 0");
+    return BigInt(Math.round(sol * 10 ** SOL_DECIMALS));
   }
 
   async quoteBuy(
@@ -42,8 +58,11 @@ export class PaperQuotes {
     tokenMint: string,
     tokenDecimals: number | null,
   ): Promise<ExecutionQuote> {
-    // Quote-only: no taker -> no transaction. Nothing signed or sent.
-    const q = await this.transport.quoteBuy(solAmount, tokenMint);
+    // Quote-only: broker never supplies taker -> no transaction. Nothing signed or sent.
+    const q = toTransportQuote(
+      "buy",
+      await this.transport.quote(SOL_MINT, tokenMint, PaperQuotes.lamports(solAmount)),
+    );
     return {
       side: "buy",
       endpoint: this.endpoint,
@@ -65,7 +84,10 @@ export class PaperQuotes {
     tokenMint: string,
     tokenDecimals: number | null,
   ): Promise<ExecutionQuote> {
-    const q = await this.transport.quoteSell(tokenAmountSmallest, tokenMint);
+    const q = toTransportQuote(
+      "sell",
+      await this.transport.quote(tokenMint, SOL_MINT, tokenAmountSmallest),
+    );
     return {
       side: "sell",
       endpoint: this.endpoint,

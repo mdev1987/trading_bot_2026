@@ -34,3 +34,21 @@ export const tradingConfig = {
   minPositionSol: 0.02,
   maxPositionSol: 0.1,
 } as const;
+
+/**
+ * Single source of truth for strategy parameters (SRT-derived values plus
+ * engineering test parameters). All runners (backtest, paper-live) read
+ * from here so values cannot drift between copies.
+ */
+export const strategyConfig = {
+  swingLookback: 3,
+  levelTolerancePct: 0.75,
+  supportTolerancePct: 1.0,
+  breakoutPct: 0.25,
+  analysisWindowCandles: 672,
+  /** Paper-test profit targets (engineering parameters, NOT SRT rules). */
+  targets: [
+    { id: "tp1", profitPct: 25, sellFraction: 0.25 },
+    { id: "tp2", profitPct: 50, sellFraction: 0.5 },
+  ],
+} as const;

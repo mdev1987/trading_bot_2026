@@ -5,6 +5,8 @@ const LAMPORTS_PER_SOL = 1_000_000_000n;
 export interface PaperPosition {
   tokenMint: string;
   tokenAmountRaw: bigint;
+  /** Token amount at entry. Sells are fractions of THIS, not of the remainder. */
+  originalTokenAmountRaw: bigint;
   entryPriceUsd: number;
   originalSizeSol: number;
   remainingSizeSol: number;
@@ -12,6 +14,8 @@ export interface PaperPosition {
 }
 
 export interface PaperTrade {
+  /** Unique per action; lets the DuckDB ledger reconcile idempotently. */
+  eventId: string;
   side: "buy" | "sell";
   time: string;
   requestedSol: number;
@@ -86,6 +90,7 @@ export class PaperAccount {
     this.position = {
       tokenMint,
       tokenAmountRaw: quote.outAmount,
+      originalTokenAmountRaw: quote.outAmount,
       entryPriceUsd: marketPriceUsd,
       originalSizeSol: actualSol,
       remainingSizeSol: actualSol,
@@ -93,6 +98,7 @@ export class PaperAccount {
     };
 
     this.trades.push({
+      eventId: crypto.randomUUID(),
       side: "buy",
       time: new Date().toISOString(),
       requestedSol: amountSol,
@@ -108,6 +114,29 @@ export class PaperAccount {
     return quote;
   }
 
+  /** Token amount a sell of this fraction would move. No state change. */
+  plannedSellAmount(fractionOfOriginal: number): bigint {
+    if (!this.position) {
+      throw new Error("Paper account has no open position");
+    }
+    if (fractionOfOriginal <= 0 || fractionOfOriginal > 1) {
+      throw new Error("fractionOfOriginal must be > 0 and <= 1");
+    }
+    const tokenAmount = this.position.tokenAmountRaw;
+    let sellAmountRaw =
+      fractionOfOriginal >= 1
+        ? tokenAmount
+        : (this.position.originalTokenAmountRaw * BigInt(Math.round(fractionOfOriginal * 1_000_000))) /
+          1_000_000n;
+    if (sellAmountRaw <= 0n) {
+      throw new Error("Calculated sell amount is zero");
+    }
+    if (sellAmountRaw > tokenAmount) {
+      sellAmountRaw = tokenAmount;
+    }
+    return sellAmountRaw;
+  }
+
   async sell(
     broker: {
       quote(inputMint: string, outputMint: string, amount: bigint): Promise<JupiterPaperQuote>;
@@ -117,6 +146,7 @@ export class PaperAccount {
     fractionOfOriginal: number,
     marketPriceUsd: number,
     reason: string,
+    prequoted?: JupiterPaperQuote,
   ): Promise<JupiterPaperQuote> {
     if (!this.position) {
       throw new Error("Paper account has no open position");
@@ -130,10 +160,13 @@ export class PaperAccount {
 
     const tokenAmount = this.position.tokenAmountRaw;
 
-    // For partial exits, sell the requested fraction of the original token allocation.
-    let sellAmountRaw =
-      fractionOfOriginal >= 1 ? tokenAmount : (tokenAmount * BigInt(Math.round(fractionOfOriginal * 1_000_000))) / 1_000_000n;
-
+    // Fraction of the ORIGINAL allocation (Module 9 sellFraction semantics):
+    // TP1 25% + TP2 50% of 100 leaves 25, not 37.5. Clamp to what remains
+    // so a retried/overlapping sell can never oversell.
+    // A pre-fetched quote may fix the amount; still clamp defensively.
+    let sellAmountRaw = prequoted
+      ? BigInt(prequoted.inAmount)
+      : this.plannedSellAmount(fractionOfOriginal);
     if (sellAmountRaw <= 0n) {
       throw new Error("Calculated sell amount is zero");
     }
@@ -141,7 +174,7 @@ export class PaperAccount {
       sellAmountRaw = tokenAmount;
     }
 
-    const quote = await broker.quote(tokenMint, solMint, sellAmountRaw);
+    const quote = prequoted ?? (await broker.quote(tokenMint, solMint, sellAmountRaw));
 
     if (quote.transactionPresent) {
       throw new Error("Safety check failed: paper quote unexpectedly contains a transaction");
@@ -158,6 +191,7 @@ export class PaperAccount {
     this.realizedPnlSol += receivedSol - nominalSoldSol;
 
     this.trades.push({
+      eventId: crypto.randomUUID(),
       side: "sell",
       time: new Date().toISOString(),
       requestedSol: nominalSoldSol,
@@ -186,11 +220,17 @@ export class PaperAccount {
     };
   }
 
-  /** Restore balance/position/stats from persisted JSON state (BigInt-safe). */
+  /** Restore balance/position/stats/history from persisted JSON state (BigInt-safe). */
   restoreState(s: {
     solBalance: number;
     realizedPnlSol: number;
-    position: Omit<PaperPosition, "tokenAmountRaw"> & { tokenAmountRaw: string } | null;
+    position:
+      | (Omit<PaperPosition, "tokenAmountRaw" | "originalTokenAmountRaw"> & {
+          tokenAmountRaw: string;
+          originalTokenAmountRaw?: string;
+        })
+      | null;
+    trades?: (Omit<PaperTrade, "tokenAmountRaw"> & { tokenAmountRaw: string })[];
   }): void {
     if (!Number.isFinite(s.solBalance) || s.solBalance < 0) {
       throw new Error("Invalid persisted balance");
@@ -198,7 +238,17 @@ export class PaperAccount {
     this.solBalance = s.solBalance;
     this.realizedPnlSol = Number.isFinite(s.realizedPnlSol) ? s.realizedPnlSol : 0;
     this.position = s.position
-      ? { ...s.position, tokenAmountRaw: BigInt(s.position.tokenAmountRaw) }
+      ? {
+          ...s.position,
+          tokenAmountRaw: BigInt(s.position.tokenAmountRaw),
+          originalTokenAmountRaw: BigInt(
+            s.position.originalTokenAmountRaw ?? s.position.tokenAmountRaw,
+          ),
+        }
       : null;
+    this.trades.length = 0;
+    for (const t of s.trades ?? []) {
+      this.trades.push({ ...t, tokenAmountRaw: BigInt(t.tokenAmountRaw) });
+    }
   }
 }

@@ -257,8 +257,12 @@ export function analyzeMarket(
   const market = analyzeStructure(candles, swingLookback);
   const levels = findLevels(candles, swingLookback, levelTolerancePct, 2);
 
-  const supports = levels.filter((level) => level.price < currentPrice);
-  const resistances = levels.filter((level) => level.price > currentPrice);
+  // levels are sorted by touch count; supports/resistances must be sorted
+  // by distance so .at(0) is genuinely the NEAREST level, not the most-touched.
+  const byDistance = (a: PriceLevel, b: PriceLevel) =>
+    Math.abs(currentPrice - a.price) - Math.abs(currentPrice - b.price);
+  const supports = levels.filter((level) => level.price < currentPrice).sort(byDistance);
+  const resistances = levels.filter((level) => level.price > currentPrice).sort(byDistance);
 
   return {
     market,

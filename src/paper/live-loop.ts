@@ -6,7 +6,7 @@ import { analyzeMarket } from "../strategy/structure";
 import { detectSetup } from "../strategy/setup";
 import { confirmSetup } from "../strategy/confirmation";
 import { createEntryDecision } from "../strategy/entry";
-import { createPosition, managePosition, type Position } from "../strategy/position";
+import { createPosition, managePosition, type MonitorBar, type Position } from "../strategy/position";
 import type { Candle } from "../market/ohlcv";
 import { config } from "../config";
 import {
@@ -17,7 +17,6 @@ import {
   type TokenContext,
 } from "../telegram";
 
-const INTERVAL_MS = 15_000;
 const CANDLE_INTERVAL = "15m" as const;
 
 const QUOTE_SYMBOLS = new Set(["SOL", "WSOL", "USDC", "USDT"]);
@@ -35,6 +34,8 @@ export interface LivePaperConfig {
   supportTolerancePct: number;
   breakoutPct: number;
   analysisWindowCandles: number;
+  targets: { id: string; profitPct: number; sellFraction: number }[];
+  pollMs: number;
   paths: { stateFile: string; ledgerFile: string };
 }
 
@@ -63,15 +64,16 @@ export class LivePaperLoop {
       throw new Error("Paper loop already running");
     }
 
-    // Recover persisted state (open position, balance, stats).
+    // Recover persisted state unconditionally: balance, open positions,
+    // history and stats all come from disk, never from defaults.
     const persisted = await this.store.init();
-    if (persisted.balanceSol !== this.config.startingBalanceSol || persisted.paperPosition) {
-      this.account.restoreState({
-        solBalance: persisted.balanceSol,
-        realizedPnlSol: persisted.realizedPnlSol,
-        position: persisted.paperPosition,
-      });
-    }
+    this.account.restoreState({
+      solBalance: persisted.balanceSol,
+      realizedPnlSol: persisted.realizedPnlSol,
+      position: persisted.paperPosition,
+      trades:
+        persisted.trades?.map((t) => ({ ...t, tokenAmountRaw: t.tokenAmountRaw })) ?? [],
+    });
     this.strategyPosition = persisted.strategyPosition;
     this.lastProcessedCandle = persisted.lastProcessedCandle ?? "";
     if (this.strategyPosition) {
@@ -99,7 +101,7 @@ export class LivePaperLoop {
       } catch (error) {
         console.error("Paper loop error:", error instanceof Error ? error.message : error);
       }
-      await Bun.sleep(INTERVAL_MS);
+      await Bun.sleep(this.config.pollMs);
     }
   }
 
@@ -156,22 +158,18 @@ export class LivePaperLoop {
       return;
     }
 
-    // Drop the still-forming candle: only closed candles confirm signals,
-    // consistent with the closed-candle replay assumption.
-    const maybeForming = rows.at(-1)!;
-    if (new Date(maybeForming.time_close).getTime() > Date.now()) {
-      rows.pop();
-    }
-
-    const closed = rows.at(-1);
+    // The latest row may still be forming. It must never confirm signals
+    // (closed-candle rule), but its high/low/close ARE the live monitor
+    // for stops and targets between closed candles.
+    const lastRow = rows.at(-1)!;
+    const lastIsForming = new Date(lastRow.time_close).getTime() > Date.now();
+    const closedRows = lastIsForming ? rows.slice(0, -1) : rows;
+    const closed = closedRows.at(-1);
     if (!closed) return;
-    if (closed.time_close === this.lastProcessedCandle) return;
-    this.lastProcessedCandle = closed.time_close;
-    await this.store.save({ lastProcessedCandle: closed.time_close });
 
-    console.log(`[${closed.time_close}] close=$${closed.close.toFixed(8)}`);
+    const isNewClosedCandle = closed.time_close !== this.lastProcessedCandle;
 
-    const candles: Candle[] = rows.map((r) => ({
+    const candles: Candle[] = closedRows.map((r) => ({
       timeOpen: r.time_open,
       timeClose: r.time_close,
       open: r.open,
@@ -181,46 +179,104 @@ export class LivePaperLoop {
       volume: r.volume,
     }));
 
-    await this.processStrategy(candles, closed.close);
+    // Live monitor bar: forming candle when present, else the closed candle.
+    // Stops/targets react to intrabar wicks; entries still need closed closes.
+    const monitor: MonitorBar = lastIsForming
+      ? { price: lastRow.close, high: lastRow.high, low: lastRow.low }
+      : { price: closed.close, high: closed.high, low: closed.low };
+
+    // A throw anywhere below leaves lastProcessedCandle untouched, so the
+    // candle is retried next cycle instead of being silently skipped.
+    await this.processStrategy(candles, closed.close, monitor, isNewClosedCandle);
+
+    if (isNewClosedCandle) {
+      this.lastProcessedCandle = closed.time_close;
+      await this.store.save({ lastProcessedCandle: closed.time_close });
+      console.log(`[${closed.time_close}] close=$${closed.close.toFixed(8)}`);
+    }
   }
 
-  private async processStrategy(candles: Candle[], currentPrice: number): Promise<void> {
+  private async persistAccountAndStrategy(): Promise<void> {
+    const snap = this.account.snapshot();
+    await this.store.save({
+      balanceSol: snap.solBalance,
+      realizedPnlSol: snap.realizedPnlSol,
+      paperPosition: snap.position
+        ? {
+            ...snap.position,
+            tokenAmountRaw: snap.position.tokenAmountRaw.toString(),
+            originalTokenAmountRaw: snap.position.originalTokenAmountRaw.toString(),
+          }
+        : null,
+      strategyPosition: this.strategyPosition,
+      trades: snap.trades.map((t) => ({ ...t, tokenAmountRaw: t.tokenAmountRaw.toString() })),
+    });
+  }
+
+  private async processStrategy(
+    candles: Candle[],
+    closedPrice: number,
+    monitor: MonitorBar,
+    isNewClosedCandle: boolean,
+  ): Promise<void> {
     const token = this.token!;
-    const analysis = analyzeMarket(candles, currentPrice, this.config.swingLookback, this.config.levelTolerancePct);
+    const analysis = analyzeMarket(candles, closedPrice, this.config.swingLookback, this.config.levelTolerancePct);
 
-    // Manage an open strategy position first. Jupiter is quoted only on actionable SELL.
+    // Manage an open strategy position on EVERY tick with the live monitor
+    // bar. Jupiter is quoted only on actionable SELL.
     if (this.strategyPosition) {
-      const openedAt = this.account.openPosition?.openedAt ?? new Date().toISOString();
-      const update = managePosition(this.strategyPosition, currentPrice, analysis);
-      this.strategyPosition = update.position.status === "closed" ? null : update.position;
+      // Proposal only: pure function, authoritative state commits below
+      // after quotes succeed. A failed quote keeps the old position and the
+      // candle is retried, never wedged.
+      const proposal = managePosition(this.strategyPosition, monitor, analysis);
+      const sells = proposal.actions.filter(
+        (a) => a.type === "partial-take-profit" || a.type === "full-exit",
+      );
 
-      for (const action of update.actions) {
-        if (action.type === "partial-take-profit" || action.type === "full-exit") {
+      // Phase 1: pre-quote every planned sell BEFORE touching any state.
+      // If any quote fails, the proposal is discarded, the authoritative
+      // position is untouched, and the candle is retried next tick.
+      const planned: {
+        action: (typeof sells)[number];
+        fraction: number;
+        quote: Awaited<ReturnType<JupiterPaperBroker["quote"]>>;
+      }[] = [];
+      for (const action of sells) {
+        const fraction =
+          action.type === "full-exit"
+            ? 1
+            : Math.min(1, action.quantitySol / (proposal.position.originalSizeSol || action.quantitySol));
+        const amount = this.account.plannedSellAmount(fraction);
+        const quote = await this.jupiter.quote(this.config.tokenMint, this.config.solMint, amount);
+        if (quote.transactionPresent) {
+          throw new Error("Safety check failed: paper quote unexpectedly contains a transaction");
+        }
+        planned.push({ action, fraction, quote });
+      }
+
+      // Phase 2: all quotes good — execute, then commit the proposal once.
+      try {
+        for (const { action, fraction, quote } of planned) {
           const balanceBefore = this.account.balanceSol;
           const realizedBefore = this.account.snapshot().realizedPnlSol;
-          const fraction =
-            action.type === "full-exit"
-              ? 1
-              : Math.min(1, action.quantitySol / (update.position.originalSizeSol || action.quantitySol));
-          const quote = await this.account.sell(
+          await this.account.sell(
             this.jupiter,
             this.config.solMint,
             this.config.tokenMint,
             fraction,
-            currentPrice,
+            action.price,
             action.reason,
+            quote,
           );
           const snap = this.account.snapshot();
           console.log(
             `PAPER SELL ${action.type} out=${quote.outAmount.toString()} lamports router=${quote.router ?? "?"} (${action.reason})`,
           );
-          if (action.type === "full-exit") {
-            this.strategyPosition = null;
-          }
 
           const trade = snap.trades.at(-1)!;
           const tradeNo = this.store.state.stats.trades;
           await this.store.recordTrade({
+            eventId: trade.eventId,
             time: trade.time,
             side: "sell",
             tradeNo,
@@ -232,7 +288,7 @@ export class LivePaperLoop {
             requestedSol: trade.requestedSol,
             actualSol: trade.actualSol,
             tokenAmountRaw: trade.tokenAmountRaw.toString(),
-            marketPriceUsd: currentPrice,
+            marketPriceUsd: action.price,
             router: trade.router,
             priceImpactPct: trade.priceImpactPct,
             requestId: trade.requestId,
@@ -245,6 +301,7 @@ export class LivePaperLoop {
             const pnl = snap.realizedPnlSol - realizedBefore;
             const stats = this.store.state.stats;
             const won = pnl > 0;
+            this.strategyPosition = null;
             await this.store.save({
               balanceSol: snap.solBalance,
               realizedPnlSol: snap.realizedPnlSol,
@@ -256,18 +313,20 @@ export class LivePaperLoop {
                 losses: stats.losses + (won ? 0 : 1),
               },
             });
+            const openedAt = proposal.position.openedAt;
             const closedAt = new Date().toISOString();
+            const buyTrade = snap.trades.find((t) => t.side === "buy");
             await telegram(
               paperCloseMessage({
                 token,
                 tradeNo,
                 won,
-                entryPriceUsd: update.position.entryPrice,
-                exitPriceUsd: currentPrice,
+                entryPriceUsd: proposal.position.entryPrice,
+                exitPriceUsd: action.price,
                 exitReason: action.reason,
                 pnlSol: pnl,
                 pnlPct:
-                  update.position.originalSizeSol > 0 ? (pnl / update.position.originalSizeSol) * 100 : 0,
+                  proposal.position.originalSizeSol > 0 ? (pnl / proposal.position.originalSizeSol) * 100 : 0,
                 durationMs: Date.parse(closedAt) - Date.parse(openedAt),
                 openedAt,
                 closedAt,
@@ -277,17 +336,13 @@ export class LivePaperLoop {
                 losses: stats.losses + (won ? 0 : 1),
                 realizedPnlSol: snap.realizedPnlSol,
                 router: trade.router,
+                executionNote:
+                  buyTrade !== undefined
+                    ? `Exec: ${buyTrade.tokenAmountRaw.toString()} units for ${buyTrade.actualSol.toFixed(6)} SOL → ${trade.actualSol.toFixed(6)} SOL (signal $${proposal.position.entryPrice.toFixed(8)} → $${action.price.toFixed(8)})`
+                    : undefined,
               }),
             ).catch((e) => console.error("Telegram close report failed:", e));
           } else {
-            await this.store.save({
-              balanceSol: snap.solBalance,
-              realizedPnlSol: snap.realizedPnlSol,
-              paperPosition: snap.position
-                ? { ...snap.position, tokenAmountRaw: snap.position.tokenAmountRaw.toString() }
-                : null,
-              strategyPosition: this.strategyPosition,
-            });
             await telegram(
               paperPartialMessage({
                 token,
@@ -296,38 +351,41 @@ export class LivePaperLoop {
                 soldSolNominal: trade.requestedSol,
                 receivedSol: trade.actualSol,
                 remainingSol: snap.position?.remainingSizeSol ?? 0,
-                newStopUsd: update.position.currentStopPrice,
+                newStopUsd: proposal.position.currentStopPrice,
                 reason: action.reason,
                 balanceAfterSol: snap.solBalance,
               }),
             ).catch((e) => console.error("Telegram partial report failed:", e));
           }
-
-          if (action.type === "full-exit") {
-            this.strategyPosition = null;
-          }
-        } else if (action.type === "stop-moved") {
-          console.log(`Stop moved -> $${update.position.currentStopPrice.toFixed(8)} (${action.reason})`);
-          const snap = this.account.snapshot();
-          await this.store.save({
-            balanceSol: snap.solBalance,
-            realizedPnlSol: snap.realizedPnlSol,
-            paperPosition: snap.position
-              ? { ...snap.position, tokenAmountRaw: snap.position.tokenAmountRaw.toString() }
-              : null,
-            strategyPosition: this.strategyPosition,
-          });
         }
+
+        // Commit stop moves / trailing (no execution involved).
+        // If sells ran above, proposal.position already reflects them.
+        if (this.strategyPosition !== null || sells.length === 0) {
+          this.strategyPosition = proposal.position.status === "closed" ? null : proposal.position;
+          await this.persistAccountAndStrategy();
+        }
+        for (const action of proposal.actions) {
+          if (action.type === "stop-moved") {
+            console.log(`Stop moved -> $${proposal.position.currentStopPrice.toFixed(8)} (${action.reason})`);
+          }
+        }
+      } catch (error) {
+        // Quote/store failure: authoritative strategy position is untouched
+        // (proposal discarded) and the candle stays unprocessed for retry.
+        console.error("Sell execution failed, keeping position for retry:", error instanceof Error ? error.message : error);
+        throw error;
       }
     }
 
-    // No position -> look for a confirmed entry. Jupiter quoted only on CONFIRMED.
-    if (!this.strategyPosition && !this.account.openPosition) {
+    // Entries only on NEW closed candles with no open position.
+    // Jupiter quoted only on CONFIRMED.
+    if (isNewClosedCandle && !this.strategyPosition && !this.account.openPosition) {
       const setup = detectSetup(analysis, {
         supportTolerancePct: this.config.supportTolerancePct,
         breakoutPct: this.config.breakoutPct,
       });
-      const confirmed = confirmSetup(setup, currentPrice);
+      const confirmed = confirmSetup(setup, closedPrice);
 
       if (confirmed.status !== "confirmed") {
         console.log(`Setup: ${confirmed.type} ${confirmed.status} | balance=${this.account.balanceSol.toFixed(6)} SOL`);
@@ -351,7 +409,7 @@ export class LivePaperLoop {
         this.config.solMint,
         this.config.tokenMint,
         entry.positionSol,
-        currentPrice,
+        closedPrice,
         "breakout-confirmed",
       );
       const snap = this.account.snapshot();
@@ -362,10 +420,12 @@ export class LivePaperLoop {
         entryPrice: entry.entryPrice,
         positionSol: entry.positionSol,
         stopPrice: entry.stopPrice,
-        targets: [
-          { id: "tp1", triggerPrice: entry.entryPrice * 1.25, sellFraction: 0.25 },
-          { id: "tp2", triggerPrice: entry.entryPrice * 1.5, sellFraction: 0.5 },
-        ],
+        targets: this.config.targets.map((t) => ({
+          id: t.id,
+          triggerPrice: entry.entryPrice * (1 + t.profitPct / 100),
+          sellFraction: t.sellFraction,
+        })),
+        openedAt: candles.at(-1)!.timeClose,
       });
 
       const tradeNo = this.store.state.stats.trades + 1;
@@ -373,13 +433,19 @@ export class LivePaperLoop {
         balanceSol: snap.solBalance,
         realizedPnlSol: snap.realizedPnlSol,
         paperPosition: snap.position
-          ? { ...snap.position, tokenAmountRaw: snap.position.tokenAmountRaw.toString() }
+          ? {
+              ...snap.position,
+              tokenAmountRaw: snap.position.tokenAmountRaw.toString(),
+              originalTokenAmountRaw: snap.position.originalTokenAmountRaw.toString(),
+            }
           : null,
         strategyPosition: this.strategyPosition,
         stats: { ...this.store.state.stats, trades: tradeNo },
+        trades: snap.trades.map((t) => ({ ...t, tokenAmountRaw: t.tokenAmountRaw.toString() })),
       });
       const trade = snap.trades.at(-1)!;
       await this.store.recordTrade({
+        eventId: trade.eventId,
         time: trade.time,
         side: "buy",
         tradeNo,
@@ -391,7 +457,7 @@ export class LivePaperLoop {
         requestedSol: trade.requestedSol,
         actualSol: trade.actualSol,
         tokenAmountRaw: trade.tokenAmountRaw.toString(),
-        marketPriceUsd: currentPrice,
+        marketPriceUsd: closedPrice,
         router: trade.router,
         priceImpactPct: trade.priceImpactPct,
         requestId: trade.requestId,
@@ -423,6 +489,7 @@ export class LivePaperLoop {
       return;
     }
 
+    if (!isNewClosedCandle) return;
     console.log(
       `Paper balance: ${this.account.balanceSol.toFixed(6)} SOL | Position: ${this.account.openPosition ? `OPEN remaining=${this.account.openPosition.remainingSizeSol.toFixed(6)} SOL` : "NONE"}`,
     );
