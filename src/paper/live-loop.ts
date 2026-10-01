@@ -7,6 +7,8 @@ import { detectSetup } from "../strategy/setup";
 import { confirmSetup } from "../strategy/confirmation";
 import { createEntryDecision } from "../strategy/entry";
 import { createPosition, managePosition, type MonitorBar, type Position } from "../strategy/position";
+import { assessSafety } from "../safety/assessment";
+import { getMarketContext, formatMarketContext } from "../market/mtf";
 import type { Candle } from "../market/ohlcv";
 import { config } from "../config";
 import {
@@ -275,6 +277,27 @@ export class LivePaperLoop {
   ): Promise<void> {
     const token = this.token!;
     const analysis = analyzeMarket(candles, closedPrice, this.config.swingLookback, this.config.levelTolerancePct);
+
+    // Course-fidelity context (reporting only — strategy still trades m15):
+    // safety checklist (all-unknown until sources wired) + MTF trends.
+    // Fetched only on new closed candles to spare API credits.
+    if (isNewClosedCandle) {
+      const safety = assessSafety();
+      console.log(
+        `SAFETY decision=${safety.decision} (dev/snipers/insiders/bundles/holders/fees/dex/clusters/chart all ${safety.dev.status} — no sources wired)`,
+      );
+      try {
+        const mtf = await getMarketContext(
+          this.paprika,
+          this.config.poolAddress,
+          this.config.swingLookback,
+          this.config.levelTolerancePct,
+        );
+        console.log(formatMarketContext(mtf));
+      } catch (error) {
+        console.error("MTF context failed:", error instanceof Error ? error.message : error);
+      }
+    }
 
     // Manage an open strategy position on EVERY tick with the live monitor
     // bar. Jupiter is quoted only on actionable SELL.

@@ -19,6 +19,7 @@ export function printBacktestReport(result: BacktestResult): void {
   console.log(`Win rate          : ${result.winRatePct.toFixed(2)}%`);
   console.log(`Max drawdown      : ${result.maxDrawdownSol.toFixed(4)} SOL`);
   console.log(`Max drawdown %    : ${result.maxDrawdownPct.toFixed(2)}%`);
+  console.log(`Execution costs : ${result.totalCostsSol.toFixed(4)} SOL`);
   console.log();
 
   for (const [index, trade] of result.trades.entries()) {

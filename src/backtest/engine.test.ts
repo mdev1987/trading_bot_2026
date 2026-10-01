@@ -92,4 +92,19 @@ describe("backtest ledger integrity", () => {
     expect(result.totalTrades).toBe(0);
     expect(result.maxDrawdownSol).toBe(0);
   });
+
+  test("execution costs only drag PnL, never create it", () => {
+    const closes: number[] = [];
+    let p = 1;
+    for (let i = 0; i < 80; i++) {
+      p *= 1.003;
+      closes.push(p * (1 + 0.02 * Math.sin(i)));
+    }
+    const candles = candlesFromCloses(closes);
+    const raw = runBacktest(token, candles, { ...config, costPerSideBps: 0 });
+    const stressed = runBacktest(token, candles, { ...config, costPerSideBps: 250 });
+    expect(raw.totalTrades).toBeGreaterThan(0);
+    expect(stressed.totalCostsSol).toBeGreaterThan(0);
+    expect(stressed.totalPnlSol).toBeLessThan(raw.totalPnlSol);
+  });
 });

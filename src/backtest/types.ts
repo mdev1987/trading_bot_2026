@@ -1,3 +1,17 @@
+/**
+ * Historical execution-cost model. Flat per-side assumptions, stated
+ * explicitly — NOT venue measurements and NOT a per-pool AMM model
+ * (Meteora/fast pools cannot share one bps curve). Paper/live uses
+ * real Jupiter quotes instead.
+ */
+export type HistoricalExecutionModel = "none" | "conservative" | "amm-stress";
+
+export const HISTORICAL_EXECUTION_BPS: Record<HistoricalExecutionModel, number> = {
+  none: 0,
+  conservative: 75,
+  "amm-stress": 250,
+};
+
 export interface BacktestConfig {
   startingBalanceSol: number;
 
@@ -30,6 +44,12 @@ export interface BacktestConfig {
     profitPct: number;
     sellFraction: number;
   }[];
+
+  /**
+   * Per-side execution cost for historical fills. Applied to entry
+   * notional and every exit proceed. 0 = raw strategy PnL.
+   */
+  costPerSideBps?: number;
 }
 
 export interface BacktestTrade {
@@ -75,6 +95,8 @@ export interface BacktestResult {
 
   maxDrawdownSol: number;
   maxDrawdownPct: number;
+
+  totalCostsSol: number;
 
   trades: BacktestTrade[];
 }

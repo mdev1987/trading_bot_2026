@@ -41,8 +41,10 @@ export async function enrichPool(
       totalSupply: details.total_supply ?? null,
 
       // SRT specifies market cap, DexPaprika gives FDV.
-      // Do NOT substitute FDV here. Resolved later via MarketCapProvider.
-      marketCapUsd: null,
+      // Do NOT substitute FDV here. TokenDetails.market_cap is read when
+      // present (often absent for memecoins) — null stays null, and the
+      // Phase 2/3 classifiers reject null by design.
+      marketCapUsd: details.market_cap ?? null,
 
       poolCreatedAt: poolRow.created_at,
 

@@ -2,7 +2,11 @@ import { DexPaprikaData } from "./dexpaprika";
 import { getPoolCandles } from "./market/ohlcv";
 import { runBacktest } from "./backtest/engine";
 import { printBacktestReport } from "./backtest/report";
-import type { BacktestConfig } from "./backtest/types";
+import {
+  HISTORICAL_EXECUTION_BPS,
+  type BacktestConfig,
+  type HistoricalExecutionModel,
+} from "./backtest/types";
 import type { CandidateToken } from "./models";
 import { strategyConfig, tradingConfig } from "./config";
 
@@ -22,6 +26,7 @@ const backtestConfig: BacktestConfig = {
   breakoutPct: strategyConfig.breakoutPct,
   analysisWindowCandles: strategyConfig.analysisWindowCandles,
   targets: strategyConfig.targets.map((t) => ({ ...t })),
+  costPerSideBps: 0,
 };
 
 async function main() {
@@ -68,9 +73,18 @@ async function main() {
     priceChange24h: null,
   };
 
-  const result = runBacktest(token, candles, backtestConfig);
-
-  printBacktestReport(result);
+  // One replay per execution model: raw strategy PnL plus two
+  // explicitly-labeled cost scenarios (flat per-side assumptions).
+  const models: HistoricalExecutionModel[] = ["none", "conservative", "amm-stress"];
+  for (const model of models) {
+    console.log();
+    console.log(`--- execution: ${model} (${HISTORICAL_EXECUTION_BPS[model]} bps/side) ---`);
+    const result = runBacktest(token, candles, {
+      ...backtestConfig,
+      costPerSideBps: HISTORICAL_EXECUTION_BPS[model],
+    });
+    printBacktestReport(result);
+  }
 }
 
 main().catch((error) => {

@@ -27,6 +27,7 @@ function emptyResult(balance: number): BacktestResult {
     winRatePct: 0,
     maxDrawdownSol: 0,
     maxDrawdownPct: 0,
+    totalCostsSol: 0,
     trades: [],
   };
 }
@@ -73,6 +74,9 @@ export function runBacktest(
   const trades: BacktestTrade[] = [];
   let candleIndex = 0;
   let exitedThisCandle = false;
+  let totalCostsSol = 0;
+
+  const costRate = (config.costPerSideBps ?? 0) / 10_000;
 
   for (let i = 0; i < candles.length; i++) {
     candleIndex = i;
@@ -114,16 +118,20 @@ export function runBacktest(
         if (action.type === "partial-take-profit") {
           const profitPct = pnlPct(trade.entryPrice, action.price);
           const realized = pnlSol(action.quantitySol, profitPct);
-          trade.realizedPnlSol += realized;
-          balance += realized;
+          const cost = (action.quantitySol + realized) * costRate;
+          trade.realizedPnlSol += realized - cost;
+          balance += realized - cost;
+          totalCostsSol += cost;
           trade.partialExits++;
         }
 
         if (action.type === "full-exit") {
           const profitPct = pnlPct(trade.entryPrice, action.price);
           const realized = pnlSol(action.quantitySol, profitPct);
-          trade.realizedPnlSol += realized;
-          balance += realized;
+          const cost = (action.quantitySol + realized) * costRate;
+          trade.realizedPnlSol += realized - cost;
+          balance += realized - cost;
+          totalCostsSol += cost;
 
           trade.exitTime = candle.timeClose;
           trade.exitPrice = action.price;
@@ -177,6 +185,10 @@ export function runBacktest(
         continue;
       }
 
+      const entryCost = entry.positionSol * costRate;
+      balance -= entryCost;
+      totalCostsSol += entryCost;
+
       const targets = config.targets.map((target) => ({
         id: target.id,
         triggerPrice: entry.entryPrice * (1 + target.profitPct / 100),
@@ -226,8 +238,10 @@ export function runBacktest(
       if (remaining > 0) {
         const profit = pnlPct(activeTrade.entryPrice, last.close);
         const realized = pnlSol(remaining, profit);
-        activeTrade.realizedPnlSol += realized;
-        balance += realized;
+        const cost = (remaining + realized) * costRate;
+        activeTrade.realizedPnlSol += realized - cost;
+        balance += realized - cost;
+        totalCostsSol += cost;
       }
       activeTrade.exitTime = last.timeClose;
       activeTrade.exitPrice = last.close;
@@ -263,6 +277,7 @@ export function runBacktest(
     winRatePct: trades.length > 0 ? (winningTrades / trades.length) * 100 : 0,
     maxDrawdownSol,
     maxDrawdownPct,
+    totalCostsSol,
     trades,
   };
 }
