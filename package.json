@@ -1,0 +1,27 @@
+{
+  "name": "trading_bot_2026",
+  "module": "src/main.ts",
+  "type": "module",
+  "private": true,
+  "devDependencies": {
+    "@types/bun": "latest"
+  },
+  "scripts": {
+    "start": "bun run ./src/main.ts",
+    "simulate": "bun run ./src/simulate-position.ts",
+    "simulate-execution": "bun run ./src/simulate-execution.ts",
+    "quote-jupiter": "bun run ./src/quote-jupiter.ts",
+    "paper-jupiter": "bun run ./src/simulate-paper-jupiter.ts",
+    "paper-live": "bun run ./src/main-paper.ts"
+  },
+  "peerDependencies": {
+    "typescript": "^7"
+  },
+  "dependencies": {
+    "@duckdb/node-api": "^1.5.6-r.1",
+    "dexpaprika-sdk": "^1.12.1",
+    "grammy": "^1.46.0",
+    "lowdb": "^7.0.1",
+    "telegram-markdown-v2": "^0.0.5"
+  }
+}
