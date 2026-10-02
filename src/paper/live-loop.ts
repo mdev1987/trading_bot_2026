@@ -510,7 +510,7 @@ export class LivePaperLoop {
     if (isNewClosedCandle) {
       const safety = assessSafety(emptySafetyInput(this.activePool.tokenMint));
       console.log(
-        `SAFETY ${this.token?.symbol ?? "?"} decision=${safety.decision} (${safety.reasons.length} unknown — no sources wired)`,
+        `SAFETY ${this.token?.symbol ?? "?"} pre-check decision=${safety.decision} (providers resolve on confirmed setups: Helius holders + DEX orders)`,
       );
     }
 
