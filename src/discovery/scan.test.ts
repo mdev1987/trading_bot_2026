@@ -1,10 +1,9 @@
 import { describe, expect, test } from "bun:test";
 import {
-  classifyWithProxy,
+  classifyEligibility,
   diffWatchlist,
   mergePinned,
   rankCandidates,
-  withMarketCapProxy,
   type WatchCandidate,
 } from "./scan";
 import type { CandidateToken } from "../models";
@@ -51,42 +50,45 @@ const watch = (poolAddress: string, volume24hUsd: number | null): WatchCandidate
   priceChange1h: null,
   priceChange6h: null,
   priceChange24h: null,
-  marketCapSource: "fdv-proxy",
+  marketCapSource: "reported",
+  eligibility: "ready",
+  eligibilityReason: "real market cap passes gates",
 });
 
-describe("withMarketCapProxy", () => {
-  test("keeps reported market cap", () => {
-    const { token, source } = withMarketCapProxy({ ...base, marketCapUsd: 1_500_000 });
-    expect(source).toBe("reported");
-    expect(token.marketCapUsd).toBe(1_500_000);
-  });
-
-  test("falls back to FDV and labels it", () => {
-    const { token, source } = withMarketCapProxy(base);
-    expect(source).toBe("fdv-proxy");
-    expect(token.marketCapUsd).toBe(2_000_000);
-  });
-
-  test("stays null when neither exists", () => {
-    const { token } = withMarketCapProxy({ ...base, fdvUsd: null });
-    expect(token.marketCapUsd).toBeNull();
-  });
-});
-
-describe("classifyWithProxy", () => {
-  test("aged pool passes Phase 2 via FDV proxy", () => {
-    const hit = classifyWithProxy(base, true);
+describe("classifyEligibility (FDV never satisfies market cap)", () => {
+  test("null market cap is age-compatible but BLOCKED, FDV untouched", () => {
+    const hit = classifyEligibility(base);
     expect(hit?.candidate.phase).toBe("phase2");
-    expect(hit?.source).toBe("fdv-proxy");
+    expect(hit?.source).toBe("unknown");
+    expect(hit?.eligibility).toBe("blocked");
+    expect(hit?.reason).toBe("market cap unavailable");
+    expect(hit?.candidate.marketCapUsd).toBeNull();
+    expect(hit?.candidate.fdvUsd).toBe(2_000_000);
   });
 
-  test("strict mode rejects null market cap", () => {
-    expect(classifyWithProxy(base, false)).toBeNull();
+  test("real market cap passing gates is READY", () => {
+    const hit = classifyEligibility({ ...base, marketCapUsd: 1_500_000 });
+    expect(hit?.candidate.phase).toBe("phase2");
+    expect(hit?.source).toBe("reported");
+    expect(hit?.eligibility).toBe("ready");
   });
 
-  test("fresh pool rejected even with proxy", () => {
+  test("real market cap above the Phase 3 ceiling cannot go READY", () => {
+    const ancient = {
+      ...base,
+      poolCreatedAt: new Date(Date.now() - 2000 * 3_600_000).toISOString(),
+    };
+    expect(classifyEligibility(ancient)?.eligibility).toBe("blocked");
+    expect(classifyEligibility(ancient)?.candidate.phase).toBe("phase3");
+    const rich = { ...ancient, marketCapUsd: 50_000_000 };
+    // Strict Phase 3 rejects >$10M; only the age-compatible BLOCKED label remains.
+    expect(classifyEligibility(rich)?.eligibility).toBe("blocked");
+    expect(classifyEligibility(rich)?.candidate.phase).toBe("phase3");
+  });
+
+  test("fresh pool rejected entirely", () => {
     const fresh = { ...base, poolCreatedAt: new Date().toISOString() };
-    expect(classifyWithProxy(fresh, true)).toBeNull();
+    expect(classifyEligibility(fresh)).toBeNull();
   });
 });
 

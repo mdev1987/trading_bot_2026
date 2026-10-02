@@ -9,6 +9,7 @@
   "scripts": {
     "start": "bun run ./src/main.ts",
     "simulate": "bun run ./src/simulate-position.ts",
+    "simulate-safety": "bun run ./src/simulate-safety.ts",
     "simulate-execution": "bun run ./src/simulate-execution.ts",
     "quote-jupiter": "bun run ./src/quote-jupiter.ts",
     "paper-jupiter": "bun run ./src/simulate-paper-jupiter.ts",

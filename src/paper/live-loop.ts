@@ -7,7 +7,7 @@ import { detectSetup } from "../strategy/setup";
 import { confirmSetup } from "../strategy/confirmation";
 import { createEntryDecision } from "../strategy/entry";
 import { createPosition, managePosition, type MonitorBar, type Position } from "../strategy/position";
-import { assessSafety } from "../safety/assessment";
+import { assessSafety, type SafetyInput } from "../safety/gate";
 import {
   classifyPoolByAddress,
   diffWatchlist,
@@ -34,6 +34,27 @@ import {
 const CANDLE_INTERVAL = "15m" as const;
 
 const QUOTE_SYMBOLS = new Set(["SOL", "WSOL", "USDC", "USDT"]);
+
+/**
+ * No safety data providers are wired yet (holders, launch, wallets),
+ * so every field is null and the gate deliberately returns WATCH —
+ * which blocks entries (unknown must never produce a BUY).
+ */
+function emptySafetyInput(tokenAddress: string): SafetyInput {
+  return {
+    tokenAddress,
+    globalFees: null,
+    top10HolderConcentrationPct: null,
+    largestHolderPct: null,
+    insiderPct: null,
+    bundledPct: null,
+    devPct: null,
+    sniperPct: null,
+    walletClusterDetected: null,
+    dexPaid: null,
+    suspiciousChart: null,
+  };
+}
 
 export interface LivePaperConfig {
   poolAddress: string;
@@ -291,9 +312,11 @@ export class LivePaperLoop {
         `${merged.length} candidates (${fresh.length} new, ${pinned.length} pinned)`,
       );
       for (const c of merged) {
+        const mcap = c.marketCapUsd == null ? "unknown" : `$${Math.round(c.marketCapUsd).toLocaleString()}`;
+        const fdv = c.fdvUsd == null ? "n/a" : `$${Math.round(c.fdvUsd).toLocaleString()}`;
         console.log(
-          `  - ${c.tokenSymbol} [${c.phase}] vol=${Math.round(c.volume24hUsd ?? 0)} ` +
-          `mcap~${Math.round(c.marketCapUsd ?? 0)} (${c.marketCapSource}) age=${(c.pairAgeHours / 24).toFixed(1)}d` +
+          `  - ${c.tokenSymbol} [${c.phase}${c.eligibility === "ready" ? "" : "-age-compatible"}] ` +
+          `MCAP: ${mcap} | FDV: ${fdv} | eligibility=${c.eligibility.toUpperCase()} (${c.eligibilityReason})` +
           (pinnedMark.has(c.poolAddress) ? " 📌" : ""),
         );
       }
@@ -308,7 +331,10 @@ export class LivePaperLoop {
             poolAddress: c.poolAddress,
             volume24hUsd: c.volume24hUsd,
             marketCapUsd: c.marketCapUsd,
+            fdvUsd: c.fdvUsd,
             marketCapSource: c.marketCapSource,
+            eligibility: c.eligibility,
+            eligibilityReason: c.eligibilityReason,
             pairAgeHours: c.pairAgeHours,
           })),
           activeSymbol: this.token?.symbol ?? null,
@@ -435,13 +461,13 @@ export class LivePaperLoop {
     const token = this.token!;
     const analysis = analyzeMarket(candles, closedPrice, this.config.swingLookback, this.config.levelTolerancePct);
 
-    // Safety checklist is local (no API cost). The old per-candle MTF
-    // fetch (5m/1h) always 403s on this plan, so it was dropped to free
-    // budget for discovery scans + watchlist setup checks (15m only).
+    // Safety checklist is local (no API cost). No safety data providers
+    // are wired yet, so every assessment is WATCH — entries stay blocked
+    // until real holder/wallet/launch sources exist (course-fidelity rule).
     if (isNewClosedCandle) {
-      const safety = assessSafety();
+      const safety = assessSafety(emptySafetyInput(this.activePool.tokenMint));
       console.log(
-        `SAFETY decision=${safety.decision} (dev/snipers/insiders/bundles/holders/fees/dex/clusters/chart all ${safety.dev.status} — no sources wired)`,
+        `SAFETY ${this.token?.symbol ?? "?"} decision=${safety.decision} (${safety.reasons.length} unknown — no sources wired)`,
       );
     }
 
@@ -605,7 +631,9 @@ export class LivePaperLoop {
     }
 
     // Entries only on NEW closed candles with no open position.
-    // Jupiter quoted only on CONFIRMED.
+    // Course order: eligibility (real market cap) -> SAFETY PASS ->
+    // setup -> confirmation -> Jupiter quote. Jupiter quoted only on
+    // CONFIRMED.
     if (isNewClosedCandle && !this.strategyPosition && !this.account.openPosition) {
       const entered = await this.tryEnter(
         this.activePool.poolAddress,
@@ -614,6 +642,7 @@ export class LivePaperLoop {
         analysis,
         candles.at(-1)!.timeClose,
         closedPrice,
+        this.candidateFor(this.activePool.poolAddress),
       );
       if (!entered && this.watchlist.length > 0) {
         await this.evaluateWatchlist();
@@ -627,10 +656,15 @@ export class LivePaperLoop {
     );
   }
 
+  /** Watchlist eligibility for a pool, or null when unscanned. */
+  private candidateFor(poolAddress: string): WatchCandidate | null {
+    return this.watchlist.find((c) => c.poolAddress === poolAddress) ?? null;
+  }
+
   /**
-   * Setup -> confirm -> entry-size -> paper BUY on one pool.
-   * Returns true when a position was opened. Pure strategy calls
-   * first; the Jupiter quote is the only side effect before commit.
+   * Eligibility -> SAFETY -> setup -> confirm -> entry-size -> paper BUY.
+   * Returns true when a position was opened. FDV-proxy/age-compatible
+   * candidates and non-PASS safety never reach the strategy.
    */
   private async tryEnter(
     poolAddress: string,
@@ -639,7 +673,23 @@ export class LivePaperLoop {
     analysis: ReturnType<typeof analyzeMarket>,
     candleTimeClose: string,
     closedPrice: number,
+    candidate: WatchCandidate | null,
   ): Promise<boolean> {
+    if (!candidate || candidate.eligibility !== "ready") {
+      console.log(
+        `ENTRY BLOCKED (${token.symbol}): eligibility=BLOCKED — ${candidate?.eligibilityReason ?? "pool not in eligible watchlist (market cap unavailable)"}`,
+      );
+      return false;
+    }
+
+    const safety = assessSafety(emptySafetyInput(tokenMint));
+    if (safety.decision !== "pass") {
+      console.log(
+        `ENTRY BLOCKED (${token.symbol}): safety=${safety.decision} — ${safety.reasons.slice(0, 3).join("; ")}`,
+      );
+      return false;
+    }
+
     const setup = detectSetup(analysis, {
       supportTolerancePct: this.config.supportTolerancePct,
       breakoutPct: this.config.breakoutPct,
@@ -771,6 +821,7 @@ export class LivePaperLoop {
     for (const candidate of this.watchlist) {
       if (this.strategyPosition || this.account.openPosition) return;
       if (candidate.poolAddress === this.activePool.poolAddress) continue;
+      if (candidate.eligibility !== "ready") continue;
       let candles: Candle[];
       try {
         candles = await getPoolCandles(this.paprika, candidate.poolAddress, {
@@ -795,6 +846,7 @@ export class LivePaperLoop {
           analysis,
           last.timeClose,
           last.close,
+          candidate,
         );
       } catch (error) {
         console.error(`Watch ${candidate.tokenSymbol} entry failed:`, error instanceof Error ? error.message : error);

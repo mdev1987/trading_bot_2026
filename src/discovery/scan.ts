@@ -1,19 +1,25 @@
 import type { DexPaprikaData } from "../dexpaprika";
 import { enrichPool } from "./tokens";
 import { classifyPhase2, classifyPhase3 } from "../strategy/discovery";
-import type { DiscoveryCandidate } from "../strategy/types";
+import { getAgeHours } from "../strategy/age";
+import { SRT_DISCOVERY } from "../strategy/config";
+import type { DiscoveryCandidate, DiscoveryPhase } from "../strategy/types";
 import type { CandidateToken } from "../models";
 
-export type MarketCapSource = "reported" | "fdv-proxy";
+export type MarketCapSource = "reported" | "unknown";
+
+/**
+ * Strategy eligibility. READY only with a REAL reported market cap
+ * passing the Phase gates. FDV is display-only context — it must
+ * never satisfy a market-cap filter (course-fidelity rule).
+ */
+export type Eligibility = "ready" | "blocked";
 
 export interface WatchCandidate extends DiscoveryCandidate {
-  /**
-   * DexPaprika rarely reports market_cap for memecoins, so the
-   * classifiers would reject everything. When true, FDV stands in
-   * for market cap — stated explicitly here and in every report,
-   * never silently.
-   */
   marketCapSource: MarketCapSource;
+  eligibility: Eligibility;
+  /** Why a BLOCKED candidate is blocked (market cap unavailable, ...). */
+  eligibilityReason: string;
 }
 
 export interface ScanOptions {
@@ -23,8 +29,6 @@ export interface ScanOptions {
   enrichCap?: number;
   volume24hMin?: number;
   txns24hMin?: number;
-  /** Allow FDV-as-market-cap proxy (default true). False = strict SRT. */
-  useFdvProxy?: boolean;
   /** Ranked watchlist size (default 5). */
   watchlistSize?: number;
 }
@@ -38,28 +42,66 @@ export interface ScanResult {
 
 const HOURS_AGO = (h: number): string => new Date(Date.now() - h * 3_600_000).toISOString();
 
-/** Attach a market-cap value, recording whether FDV stood in. */
-export function withMarketCapProxy(token: CandidateToken): {
-  token: CandidateToken;
-  source: MarketCapSource;
-} {
-  if (token.marketCapUsd !== null) return { token, source: "reported" };
-  if (token.fdvUsd !== null) {
-    return { token: { ...token, marketCapUsd: token.fdvUsd }, source: "fdv-proxy" };
-  }
-  return { token, source: "reported" };
-}
-
-/** Phase2/Phase3 classification with an explicitly-labeled FDV fallback. */
-export function classifyWithProxy(
+/**
+ * Course-fidelity eligibility. The strict Phase classifiers run on the
+ * REAL reported market cap only — a null mcap can never PASS. Tokens
+ * matching a phase on age + volume + transactions but lacking a real
+ * market cap are reported as age-compatible and BLOCKED, with FDV kept
+ * as display-only context.
+ */
+export function classifyEligibility(
   token: CandidateToken,
-  useFdvProxy: boolean,
   nowMs = Date.now(),
-): { candidate: DiscoveryCandidate; source: MarketCapSource } | null {
-  const { token: withCap, source } = withMarketCapProxy(token);
-  if (source === "fdv-proxy" && !useFdvProxy) return null;
-  const candidate = classifyPhase2(withCap, nowMs) ?? classifyPhase3(withCap, nowMs);
-  return candidate ? { candidate, source } : null;
+): { candidate: DiscoveryCandidate; source: MarketCapSource; eligibility: Eligibility; reason: string } | null {
+  const strict = classifyPhase2(token, nowMs) ?? classifyPhase3(token, nowMs);
+  if (strict) {
+    return { candidate: strict, source: "reported", eligibility: "ready", reason: "real market cap passes gates" };
+  }
+
+  const ageHours = getAgeHours(token.poolCreatedAt, nowMs);
+  if (!Number.isFinite(ageHours)) return null;
+
+  const volOk = (min: number): boolean => token.volume24hUsd !== null && token.volume24hUsd >= min;
+  const txnOk = (min: number): boolean => token.transactions24h !== null && token.transactions24h >= min;
+
+  let phase: DiscoveryPhase | null = null;
+  const p3 = SRT_DISCOVERY.phase3;
+  if (ageHours >= p3.minPairAgeHours && volOk(p3.minVolume24hUsd) && txnOk(p3.minTransactions24h)) {
+    phase = "phase3";
+  } else {
+    const p2 = SRT_DISCOVERY.phase2;
+    const maxOk = p2.maxPairAgeHours === undefined || ageHours <= p2.maxPairAgeHours;
+    if (ageHours >= p2.minPairAgeHours && maxOk && volOk(p2.minVolume24hUsd) && txnOk(p2.minTransactions24h)) {
+      phase = "phase2";
+    }
+  }
+  if (!phase) return null;
+
+  return {
+    candidate: {
+      phase,
+      network: token.network,
+      poolAddress: token.poolAddress,
+      tokenAddress: token.tokenAddress,
+      tokenName: token.tokenName,
+      tokenSymbol: token.tokenSymbol,
+      dexId: token.dexId,
+      dexName: token.dexName,
+      pairAgeHours: ageHours,
+      marketCapUsd: token.marketCapUsd,
+      fdvUsd: token.fdvUsd,
+      liquidityUsd: token.liquidityUsd,
+      volume24hUsd: token.volume24hUsd,
+      transactions24h: token.transactions24h,
+      priceChange5m: token.priceChange5m,
+      priceChange1h: token.priceChange1h,
+      priceChange6h: token.priceChange6h,
+      priceChange24h: token.priceChange24h,
+    },
+    source: "unknown",
+    eligibility: "blocked",
+    reason: "market cap unavailable",
+  };
 }
 
 /** Rank by 24h volume, highest first. Pure — unit tested. */
@@ -129,7 +171,6 @@ export async function scanCandidates(
   const enrichCap = options.enrichCap ?? 12;
   const volume24hMin = options.volume24hMin ?? 1_000;
   const txns24hMin = options.txns24hMin ?? 10;
-  const useFdvProxy = options.useFdvProxy ?? true;
   const watchlistSize = options.watchlistSize ?? 5;
 
   const windows = [HOURS_AGO(72), HOURS_AGO(720)];
@@ -160,8 +201,15 @@ export async function scanCandidates(
       continue;
     }
     for (const token of tokens) {
-      const hit = classifyWithProxy(token, useFdvProxy);
-      if (hit) found.push({ ...hit.candidate, marketCapSource: hit.source });
+      const hit = classifyEligibility(token);
+      if (hit) {
+        found.push({
+          ...hit.candidate,
+          marketCapSource: hit.source,
+          eligibility: hit.eligibility,
+          eligibilityReason: hit.reason,
+        });
+      }
     }
   }
 
@@ -191,7 +239,6 @@ export async function scanCandidates(
 export async function classifyPoolByAddress(
   paprika: DexPaprikaData,
   poolAddress: string,
-  useFdvProxy = true,
   nowMs = Date.now(),
 ): Promise<{ candidates: WatchCandidate[]; enriched: boolean }> {
   let tokens: CandidateToken[];
@@ -220,8 +267,15 @@ export async function classifyPoolByAddress(
   }
   const found: WatchCandidate[] = [];
   for (const token of tokens) {
-    const hit = classifyWithProxy(token, useFdvProxy, nowMs);
-    if (hit) found.push({ ...hit.candidate, marketCapSource: hit.source });
+    const hit = classifyEligibility(token, nowMs);
+    if (hit) {
+      found.push({
+        ...hit.candidate,
+        marketCapSource: hit.source,
+        eligibility: hit.eligibility,
+        eligibilityReason: hit.reason,
+      });
+    }
   }
   return { candidates: found, enriched: true };
 }

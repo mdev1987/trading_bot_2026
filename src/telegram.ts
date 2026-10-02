@@ -256,7 +256,10 @@ export interface ScanReport {
     poolAddress: string;
     volume24hUsd: number | null;
     marketCapUsd: number | null;
+    fdvUsd: number | null;
     marketCapSource: string;
+    eligibility: string;
+    eligibilityReason: string;
     pairAgeHours: number;
   }[];
   activeSymbol: string | null;
@@ -267,10 +270,16 @@ export function paperScanMessage(r: ScanReport): string {
   const lines = r.candidates.map((c, i) => {
     const vol = c.volume24hUsd == null ? "n/a" : `$${Math.round(c.volume24hUsd).toLocaleString()}`;
     const mcap =
-      c.marketCapUsd == null
-        ? "n/a"
-        : `~$${Math.round(c.marketCapUsd).toLocaleString()}${c.marketCapSource === "fdv-proxy" ? " (FDV proxy)" : ""}`;
-    return `${i + 1}. ${c.symbol} [${c.phase}] vol ${vol} | mcap ${mcap} | age ${(c.pairAgeHours / 24).toFixed(1)}d\n   \`${c.poolAddress}\``;
+      c.marketCapUsd == null ? "unknown" : `$${Math.round(c.marketCapUsd).toLocaleString()}`;
+    const fdv = c.fdvUsd == null ? "n/a" : `$${Math.round(c.fdvUsd).toLocaleString()}`;
+    const ageCompatible = c.eligibility !== "ready" ? "-age-compatible" : "";
+    const gate = c.eligibility === "ready" ? "✅ READY" : `❌ BLOCKED — ${c.eligibilityReason}`;
+    return (
+      `${i + 1}. ${c.symbol} [${c.phase}${ageCompatible}] vol ${vol} | age ${(c.pairAgeHours / 24).toFixed(1)}d` +
+      `\n   MCAP: ${mcap} | FDV: ${fdv}` +
+      `\n   Strategy eligibility: ${gate}` +
+      `\n   \`${c.poolAddress}\``
+    );
   });
   return (
     `🔎 DISCOVERY SCAN — ${r.candidates.length} candidate${r.candidates.length === 1 ? "" : "s"}\n\n` +
@@ -278,7 +287,7 @@ export function paperScanMessage(r: ScanReport): string {
     `\n\n📡 Scanned ${r.scannedPools} pools (enriched ${r.enrichedPools})` +
     `\n🎯 Tracking: ${r.activeSymbol ?? "none"}${r.positionOpen ? " (position OPEN — scan is report-only)" : " (flat — watchlist setups evaluated)"}` +
     `\n📅 ${r.at}` +
-    `\n\n_mcap via FDV proxy unless stated — DexPaprika rarely reports memecoin market cap_`
+    `\n\n_FDV is display-only context — only a real reported market cap unlocks entries_`
   );
 }
 
