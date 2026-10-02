@@ -89,6 +89,13 @@ export interface SafetyInput {
   bundledPct: number | null;
 
   devPct: number | null;
+  /**
+   * Mint/freeze authority revocation (Helius DAS). Null = unwired
+   * provider. Revocation dominates the dev verdict: no authority can
+   * mint or freeze regardless of current dev holdings.
+   */
+  mintAuthorityRevoked: boolean | null;
+  freezeAuthorityRevoked: boolean | null;
   sniperPct: number | null;
 
   walletClusterDetected: boolean | null;
@@ -207,20 +214,32 @@ export function assessSafety(
           "wallet-provider",
         );
 
-  const dev =
+  const holdingsNote =
     input.devPct === null
+      ? "holdings unknown"
+      : `holdings = ${input.devPct.toFixed(2)}%`;
+  const dev =
+    input.mintAuthorityRevoked === null || input.freezeAuthorityRevoked === null
       ? check(
           "unknown",
-          null,
-          "dev holdings/status unavailable",
+          input.devPct,
+          `dev authority status unavailable (${holdingsNote})`,
           "wallet-provider",
         )
-      : check(
-          "pass",
-          input.devPct,
-          `dev holdings = ${input.devPct.toFixed(2)}%`,
-          "wallet-provider",
-        );
+      : input.mintAuthorityRevoked && input.freezeAuthorityRevoked
+        ? check(
+            "pass",
+            input.devPct,
+            `mint+freeze authorities revoked (${holdingsNote})`,
+            "wallet-provider",
+          )
+        : check(
+            "warn",
+            input.devPct,
+            `mint authority ${input.mintAuthorityRevoked ? "revoked" : "ACTIVE"}, ` +
+              `freeze authority ${input.freezeAuthorityRevoked ? "revoked" : "ACTIVE"} (${holdingsNote})`,
+            "wallet-provider",
+          );
 
   const snipers =
     input.sniperPct === null

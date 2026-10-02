@@ -54,6 +54,8 @@ function emptySafetyInput(tokenAddress: string): SafetyInput {
     insiderPct: null,
     bundledPct: null,
     devPct: null,
+    mintAuthorityRevoked: null,
+    freezeAuthorityRevoked: null,
     sniperPct: null,
     walletClusterDetected: null,
     dexPaid: null,

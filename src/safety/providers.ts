@@ -117,20 +117,116 @@ export async function getDexPaidStatus(tokenMint: string): Promise<boolean | nul
   }
 }
 
+export interface MintAuthorities {
+  /** Null = revoked (or absent). Undefined-shaped failures stay null Tri-state via `known`. */
+  mintAuthority: string | null;
+  freezeAuthority: string | null;
+  /** First listed creator address, when the DAS record has one. */
+  creatorAddress: string | null;
+  known: boolean;
+}
+
+/**
+ * Mint/freeze authorities + creator via Helius DAS getAsset.
+ * Revoked authorities come back null — the single most important
+ * dev-risk signal (unlimited minting / freezing still possible?).
+ * `known=false` on any failure so absent data never reads as revoked.
+ */
+export async function getMintAuthorities(
+  rpcUrl: string,
+  tokenMint: string,
+): Promise<MintAuthorities> {
+  const unknown: MintAuthorities = { mintAuthority: null, freezeAuthority: null, creatorAddress: null, known: false };
+  let response: Response;
+  try {
+    response = await fetch(rpcUrl, {
+      method: "POST",
+      headers: { "content-type": "application/json", accept: "application/json" },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "getAsset", params: { id: tokenMint } }),
+      signal: AbortSignal.timeout(RPC_TIMEOUT_MS),
+    });
+  } catch (error) {
+    console.warn(`[SAFETY-DAS] getAsset failed: ${error instanceof Error ? error.message : String(error)}`);
+    return unknown;
+  }
+  if (!response.ok) {
+    console.warn(`[SAFETY-DAS] getAsset HTTP ${response.status}`);
+    return unknown;
+  }
+  try {
+    const json = (await response.json()) as RpcResponse<{
+      token_info?: { mint_authority?: string | null; freeze_authority?: string | null } | null;
+      creators?: { address?: string | null }[] | null;
+    }>;
+    if (json.error || !json.result) {
+      console.warn(`[SAFETY-DAS] getAsset error: ${json.error?.message ?? "empty result"}`);
+      return unknown;
+    }
+    const info = json.result.token_info ?? null;
+    if (!info) return unknown;
+    const creators = (json.result.creators ?? []).map((c) => c.address).filter((a): a is string => !!a);
+    return {
+      mintAuthority: info.mint_authority ?? null,
+      freezeAuthority: info.freeze_authority ?? null,
+      creatorAddress: creators[0] ?? null,
+      known: true,
+    };
+  } catch {
+    console.warn("[SAFETY-DAS] getAsset invalid JSON");
+    return unknown;
+  }
+}
+
+/**
+ * Share of total supply currently held by one wallet (dev/creator
+ * holdings estimate). Standard getTokenAccountsByOwner, summed over
+ * every token account the owner has for the mint.
+ */
+export async function getOwnerHoldingsPct(
+  rpcUrl: string,
+  ownerAddress: string,
+  tokenMint: string,
+): Promise<number | null> {
+  const [accounts, supply] = await Promise.all([
+    rpcCall<{ value: { account: { data: { parsed: { info: { tokenAmount: { uiAmount: number | string | null } } } } } }[] }>(
+      rpcUrl,
+      "getTokenAccountsByOwner",
+      [ownerAddress, { mint: tokenMint }, { encoding: "jsonParsed", commitment: "confirmed" }],
+    ),
+    rpcCall<{ value: { uiAmountString: string } }>(rpcUrl, "getTokenSupply", [
+      tokenMint,
+      { commitment: "confirmed" },
+    ]),
+  ]);
+  const total = supply?.value?.uiAmountString ? toNumber(supply.value.uiAmountString) : null;
+  if (total === null || total <= 0 || !accounts?.value) return null;
+  let held = 0;
+  for (const a of accounts.value) {
+    const n = toNumber(a?.account?.data?.parsed?.info?.tokenAmount?.uiAmount);
+    if (n !== null) held += n;
+  }
+  return (held / total) * 100;
+}
+
 /**
  * Build a gate SafetyInput with every wired source filled and the rest
- * null. Insiders, bundles, dev, snipers, wallet clusters, global fees
- * and chart behavior have no provider yet — they stay unknown, and the
+ * null. Insiders, bundles, snipers, wallet clusters, global fees and
+ * chart behavior have no provider yet — they stay unknown, and the
  * entry policy decides what unknown means (paper may trade WATCH).
  */
 export async function fetchSafetyInput(
   rpcUrl: string,
   tokenMint: string,
 ): Promise<SafetyInput> {
-  const [holders, dexPaid] = await Promise.all([
+  const [holders, dexPaid, authorities] = await Promise.all([
     getHolderConcentration(rpcUrl, tokenMint),
     getDexPaidStatus(tokenMint),
+    getMintAuthorities(rpcUrl, tokenMint),
   ]);
+  let devPct: number | null = null;
+  if (authorities.known && authorities.creatorAddress) {
+    devPct = await getOwnerHoldingsPct(rpcUrl, authorities.creatorAddress, tokenMint);
+  }
   return {
     tokenAddress: tokenMint,
     globalFees: null,
@@ -138,7 +234,9 @@ export async function fetchSafetyInput(
     largestHolderPct: holders.largestPct,
     insiderPct: null,
     bundledPct: null,
-    devPct: null,
+    devPct,
+    mintAuthorityRevoked: authorities.known ? authorities.mintAuthority === null : null,
+    freezeAuthorityRevoked: authorities.known ? authorities.freezeAuthority === null : null,
     sniperPct: null,
     walletClusterDetected: null,
     dexPaid,

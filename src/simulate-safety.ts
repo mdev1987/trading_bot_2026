@@ -17,6 +17,8 @@ const safeExample = assessSafety({
   bundledPct: 0,
 
   devPct: 2,
+  mintAuthorityRevoked: true,
+  freezeAuthorityRevoked: true,
   sniperPct: 1,
 
   walletClusterDetected: false,
@@ -41,6 +43,8 @@ const unknownExample = assessSafety({
   bundledPct: null,
 
   devPct: null,
+  mintAuthorityRevoked: null,
+  freezeAuthorityRevoked: null,
   sniperPct: null,
 
   walletClusterDetected: null,
@@ -65,6 +69,8 @@ const suspiciousExample = assessSafety({
   bundledPct: 25,
 
   devPct: 18,
+  mintAuthorityRevoked: false,
+  freezeAuthorityRevoked: false,
   sniperPct: 12,
 
   walletClusterDetected: true,

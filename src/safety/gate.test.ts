@@ -9,6 +9,8 @@ const allNull: SafetyInput = {
   insiderPct: null,
   bundledPct: null,
   devPct: null,
+  mintAuthorityRevoked: null,
+  freezeAuthorityRevoked: null,
   sniperPct: null,
   walletClusterDetected: null,
   dexPaid: null,
@@ -29,6 +31,8 @@ describe("safety gate (course thresholds, never a score)", () => {
       insiderPct: 20,
       bundledPct: 0,
       devPct: 2,
+      mintAuthorityRevoked: true,
+      freezeAuthorityRevoked: true,
       sniperPct: 1,
       walletClusterDetected: false,
       dexPaid: true,
@@ -36,6 +40,14 @@ describe("safety gate (course thresholds, never a score)", () => {
     });
     expect(a.decision).toBe("pass");
     expect(a.reasons).toEqual([]);
+  });
+
+  test("revoked authorities pass dev; active mint authority warns", () => {
+    const revoked = assessSafety({ ...allNull, mintAuthorityRevoked: true, freezeAuthorityRevoked: true, devPct: 2 });
+    expect(revoked.dev.status).toBe("pass");
+    const active = assessSafety({ ...allNull, mintAuthorityRevoked: false, freezeAuthorityRevoked: true, devPct: 2 });
+    expect(active.dev.status).toBe("warn");
+    expect(active.decision).toBe("watch");
   });
 
   test("suspicious chart FAIL rejects even when everything else passes", () => {
