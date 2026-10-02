@@ -1,6 +1,6 @@
 import type { StructureAnalysis, SwingPoint } from "./structure";
 
-export type SetupType = "bullish-reversal" | "bullish-continuation";
+export type SetupType = "bullish-reversal" | "bullish-continuation" | "range-break";
 
 export type SetupStatus = "watch" | "confirmed" | "none";
 
@@ -31,6 +31,13 @@ export interface SetupOptions {
    * to consider the previous high broken.
    */
   breakoutPct?: number;
+
+  /**
+   * Sideways range-break entries (default true). Kill-switch for
+   * isolating the reversal/continuation baseline in backtests and
+   * for disabling the noisier setup live without a code change.
+   */
+  enableRangeBreak?: boolean;
 }
 
 function isNear(price: number, level: number, tolerancePct: number): boolean {
@@ -56,6 +63,7 @@ function hasBrokenHigh(price: number, high: SwingPoint | null, breakoutPct: numb
 export function detectSetup(analysis: StructureAnalysis, options: SetupOptions = {}): SetupSignal {
   const supportTolerancePct = options.supportTolerancePct ?? 1.0;
   const breakoutPct = options.breakoutPct ?? 0.25;
+  const enableRangeBreak = options.enableRangeBreak ?? true;
 
   const price = analysis.currentPrice;
 
@@ -171,6 +179,42 @@ export function detectSetup(analysis: StructureAnalysis, options: SetupOptions =
     }
 
     return result;
+  }
+
+  /*
+   * RANGE BREAK (sideways markets only)
+   * No trend to continue or reverse — trade the range edge instead:
+   * a genuine level (2+ touches, built by findLevels) broken by
+   * breakoutPct, stop under the range floor. Same confirmation and
+   * structural sizing as every other setup; whipsaw risk is higher
+   * by construction, which is why the level-touches requirement and
+   * the paper size policy exist.
+   */
+  if (enableRangeBreak && analysis.market.trend === "sideways" && nearestResistance !== null) {
+    const rangeHigh = nearestResistance.price;
+    const rangeLow =
+      nearestSupport !== null && nearestSupport.price < rangeHigh
+        ? nearestSupport.price
+        : (lastLow?.price ?? null);
+    if (rangeLow !== null && rangeLow < price) {
+      result.type = "range-break";
+      result.invalidationPrice = rangeLow;
+      result.structuralHighPrice = rangeHigh;
+      result.triggerPrice = rangeHigh * (1 + breakoutPct / 100);
+
+      result.reason.push("sideways-range");
+      result.reason.push(`resistance-tested-${nearestResistance.touches}x`);
+
+      if (price >= result.triggerPrice) {
+        result.status = "confirmed";
+        result.reason.push("range-high-broken");
+      } else {
+        result.status = "watch";
+        result.reason.push("waiting-for-range-break");
+      }
+
+      return result;
+    }
   }
 
   result.reason.push("no-long-setup");

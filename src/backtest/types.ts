@@ -50,6 +50,12 @@ export interface BacktestConfig {
    * notional and every exit proceed. 0 = raw strategy PnL.
    */
   costPerSideBps?: number;
+
+  /**
+   * Sideways range-break entries (default true). Set false to isolate
+   * the reversal/continuation baseline.
+   */
+  enableRangeBreak?: boolean;
 }
 
 export interface BacktestTrade {

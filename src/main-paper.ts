@@ -23,6 +23,7 @@ const loop = new LivePaperLoop(
     watchlistSize: paperConfig.watchlistSize,
     scanPoolsPerWindow: paperConfig.scanPoolsPerWindow,
     scanEnrichCap: paperConfig.scanEnrichCap,
+    enableRangeBreak: paperConfig.enableRangeBreak,
   },
   config.jupiter.apiKey,
 );

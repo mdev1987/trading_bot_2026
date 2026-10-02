@@ -83,6 +83,7 @@ export interface LivePaperConfig {
   watchlistSize: number;
   scanPoolsPerWindow: number;
   scanEnrichCap: number;
+  enableRangeBreak: boolean;
 }
 
 interface ActivePool {
@@ -733,6 +734,7 @@ export class LivePaperLoop {
     const setup = detectSetup(analysis, {
       supportTolerancePct: this.config.supportTolerancePct,
       breakoutPct: this.config.breakoutPct,
+      enableRangeBreak: this.config.enableRangeBreak,
     });
     const confirmed = confirmSetup(setup, closedPrice);
 

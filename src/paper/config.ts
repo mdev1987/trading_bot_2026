@@ -31,4 +31,11 @@ export const paperConfig = {
   watchlistSize: 5,
   scanPoolsPerWindow: 15,
   scanEnrichCap: 12,
+
+  /**
+   * Sideways range-break entries. Kill-switch for the noisier setup:
+   * set false to isolate reversal/continuation without a redeploy
+   * of strategy code.
+   */
+  enableRangeBreak: true,
 } as const;

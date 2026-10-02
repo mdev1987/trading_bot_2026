@@ -157,6 +157,7 @@ export function runBacktest(
       const setup = detectSetup(analysis, {
         supportTolerancePct: config.supportTolerancePct,
         breakoutPct: config.breakoutPct,
+        enableRangeBreak: config.enableRangeBreak,
       });
 
       const confirmed = confirmSetup(setup, currentPrice);
