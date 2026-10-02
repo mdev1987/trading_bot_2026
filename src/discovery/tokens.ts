@@ -49,8 +49,10 @@ export async function enrichPool(
       continue;
     }
 
-    const details = await paprika.getToken(token.id);
-
+    // No per-token DexPaprika call: names come from the pool record and
+    // every market-data gap (mcap, FDV, price, liquidity, volume) is
+    // filled downstream by one batched DEX Screener request. This keeps
+    // the plan-limited API to pool listing + 15m candles only.
     candidates.push({
       network: paprika.network,
 
@@ -59,25 +61,22 @@ export async function enrichPool(
       dexName: poolRow.dex_name,
 
       tokenAddress: token.id,
-      tokenName: details.name,
-      tokenSymbol: details.symbol,
+      tokenName: token.name ?? token.symbol ?? token.id,
+      tokenSymbol: token.symbol ?? token.id,
 
-      tokenAddedAt: details.added_at ?? null,
-      fdvUsd: details.summary?.fdv ?? null,
-      totalSupply: details.total_supply ?? null,
+      tokenAddedAt: null,
+      fdvUsd: null,
+      totalSupply: null,
 
-      // SRT specifies market cap, DexPaprika gives FDV.
-      // Do NOT substitute FDV here. TokenDetails.market_cap is read when
-      // present (often absent for memecoins) — null stays null, and the
-      // Phase 2/3 classifiers reject null by design.
-      marketCapUsd: details.market_cap ?? null,
+      // Real market cap arrives via DEX Screener enrichment; null here
+      // means unknown and the Phase classifiers reject it by design.
+      marketCapUsd: null,
 
       poolCreatedAt: poolRow.created_at ?? fb.createdAt,
 
-      priceUsd: details.summary?.price_usd ?? poolRow.price_usd ?? null,
+      priceUsd: poolRow.price_usd ?? null,
 
-      liquidityUsd:
-        details.summary?.liquidity_usd ?? poolRow.liquidity_usd ?? null,
+      liquidityUsd: poolRow.liquidity_usd ?? null,
 
       volume24hUsd: poolRow.volume_usd_24h ?? fb.volume24hUsd,
 

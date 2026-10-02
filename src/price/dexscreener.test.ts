@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { DexScreenerPriceTracker, type PriceUpdate } from "./dexscreener";
+import { DexScreenerPriceTracker, formatScreenerContext, type PriceUpdate } from "./dexscreener";
 import type { DexScreenerPair } from "../dexscreener";
 
 const realFetch = globalThis.fetch;
@@ -45,6 +45,30 @@ describe("DexScreenerPriceTracker", () => {
     expect(seen[0]![0]!.changePct).toBeNull();
     expect(seen[1]![0]!.priceUsd).toBe(2.2);
     expect(seen[1]![0]!.changePct).toBeCloseTo(10, 5);
+  });
+
+  test("formats the multi-window context line", () => {
+    const line = formatScreenerContext({
+      tokenAddress: "MINT",
+      priceUsd: 1,
+      marketCapUsd: null,
+      fdvUsd: null,
+      liquidityUsd: null,
+      volume24hUsd: null,
+      txns24h: null,
+      priceChangeM5Pct: 0.5,
+      priceChangeH1Pct: -1.25,
+      priceChangeH6Pct: null,
+      priceChangeH24Pct: 3.456,
+      pairAddress: null,
+      dexId: "raydium",
+      pairCreatedAt: null,
+      quoteSymbol: "SOL",
+      observedAt: Date.now(),
+      previousPriceUsd: null,
+      changePct: null,
+    });
+    expect(line).toBe("MTF m5:+0.50% h1:-1.25% h6:n/a h24:+3.46% (DEX Screener, raydium)");
   });
 
   test("caps tracked tokens at maxTokens", () => {

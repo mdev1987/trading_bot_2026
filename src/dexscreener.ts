@@ -54,6 +54,14 @@ export interface DexScreenerTokenSnapshot {
 
   liquidityUsd: number | null;
 
+  /** Best-liquidity preferred-quote pair activity (all nullable). */
+  volume24hUsd: number | null;
+  txns24h: number | null;
+  priceChangeM5Pct: number | null;
+  priceChangeH1Pct: number | null;
+  priceChangeH6Pct: number | null;
+  priceChangeH24Pct: number | null;
+
   pairAddress: string | null;
   dexId: string | null;
   pairCreatedAt: number | null;
@@ -223,6 +231,10 @@ function getTokenPriceUsd(
   return null;
 }
 
+function asFiniteNumber(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
 function emptySnapshot(
   tokenAddress: string,
 ): DexScreenerTokenSnapshot {
@@ -234,6 +246,13 @@ function emptySnapshot(
     fdvUsd: null,
 
     liquidityUsd: null,
+
+    volume24hUsd: null,
+    txns24h: null,
+    priceChangeM5Pct: null,
+    priceChangeH1Pct: null,
+    priceChangeH6Pct: null,
+    priceChangeH24Pct: null,
 
     pairAddress: null,
     dexId: null,
@@ -366,6 +385,18 @@ export class DexScreenerData {
               )
                 ? pair.liquidity!.usd!
                 : null,
+
+            volume24hUsd: asFiniteNumber(pair.volume?.["h24"]),
+            txns24h:
+              asFiniteNumber(pair.txns?.["h24"]?.buys) !== null ||
+              asFiniteNumber(pair.txns?.["h24"]?.sells) !== null
+                ? (asFiniteNumber(pair.txns?.["h24"]?.buys) ?? 0) +
+                  (asFiniteNumber(pair.txns?.["h24"]?.sells) ?? 0)
+                : null,
+            priceChangeM5Pct: asFiniteNumber(pair.priceChange?.["m5"]),
+            priceChangeH1Pct: asFiniteNumber(pair.priceChange?.["h1"]),
+            priceChangeH6Pct: asFiniteNumber(pair.priceChange?.["h6"]),
+            priceChangeH24Pct: asFiniteNumber(pair.priceChange?.["h24"]),
 
             pairAddress:
               pair.pairAddress ?? null,

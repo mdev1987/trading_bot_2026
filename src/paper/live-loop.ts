@@ -20,7 +20,7 @@ import {
   type WatchCandidate,
 } from "../discovery/scan";
 import { DexScreenerMarketCap } from "../market-cap/dexscreener";
-import { DexScreenerPriceTracker, type PriceUpdate } from "../price/dexscreener";
+import { DexScreenerPriceTracker, formatScreenerContext, type PriceUpdate } from "../price/dexscreener";
 import type { Candle } from "../market/ohlcv";
 import { getPoolCandles } from "../market/ohlcv";
 import { config } from "../config";
@@ -526,6 +526,12 @@ export class LivePaperLoop {
       console.log(
         `SAFETY ${this.token?.symbol ?? "?"} pre-check decision=${safety.decision} (providers resolve on confirmed setups: Helius holders + DEX orders)`,
       );
+      // Multi-window momentum from the Screener tracker cache (free —
+      // no DexPaprika 5m/1h calls, which the plan rejects).
+      const cached = this.livePrices.get(this.activePool.tokenMint);
+      if (cached && Date.now() - cached.observedAt <= LivePaperLoop.LIVE_PRICE_MAX_AGE_MS) {
+        console.log(formatScreenerContext(cached));
+      }
     }
 
     // Manage an open strategy position on EVERY tick with the live monitor

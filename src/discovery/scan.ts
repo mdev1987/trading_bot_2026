@@ -1,6 +1,7 @@
 import type { DexPaprikaData } from "../dexpaprika";
 import { enrichPool } from "./tokens";
-import { enrichMarketCaps } from "./enrich-market-cap";
+import { enrichFromScreener } from "./enrich-market-cap";
+import { DexScreenerData } from "../dexscreener";
 import type { MarketCapProvider } from "../market-cap/provider";
 import { classifyPhase2, classifyPhase3 } from "../strategy/discovery";
 import { getAgeHours } from "../strategy/age";
@@ -27,17 +28,19 @@ export interface WatchCandidate extends DiscoveryCandidate {
 export interface ScanOptions {
   /** Pools to pull per age window (default 15). */
   poolsPerWindow?: number;
-  /** Max pools to enrich (each costs getPool + getToken calls; default 12). */
+  /** Max pools to enrich (one DexPaprika getPool each; default 12). */
   enrichCap?: number;
   volume24hMin?: number;
   txns24hMin?: number;
   /** Ranked watchlist size (default 5). */
   watchlistSize?: number;
   /**
-   * Real market-cap enrichment (DEX Screener, batched). Without it,
-   * every candidate stays BLOCKED — FDV is never substituted.
+   * Real market-cap + market-data enrichment (DEX Screener, batched).
+   * Without it, every candidate stays BLOCKED — FDV is never substituted.
    */
   marketCapProvider?: MarketCapProvider | null;
+  /** Shared DEX Screener client for gap-filling (defaults to fresh). */
+  screener?: DexScreenerData | null;
 }
 
 export interface ScanResult {
@@ -235,15 +238,19 @@ export async function scanCandidates(
     }
   }
 
-  // One batched market-cap call for every collected token (≤30/request).
-  // Without a provider, marketCapUsd stays null and everything BLOCKED.
-  const withCaps = options.marketCapProvider
-    ? await enrichMarketCaps(
-        options.marketCapProvider,
-        allTokens,
-        paprika.network,
-      )
-    : allTokens;
+  // One batched DEX Screener pass for every collected token
+  // (mcap + all market-data gaps, ≤30/request). Without it,
+  // marketCapUsd stays null and everything BLOCKED.
+  const screener = options.screener ?? new DexScreenerData("solana");
+  const withCaps =
+    options.marketCapProvider && allTokens.length > 0
+      ? await enrichFromScreener(
+          options.marketCapProvider,
+          screener,
+          allTokens,
+          paprika.network,
+        )
+      : allTokens;
 
   const found: WatchCandidate[] = [];
   for (const token of withCaps) {
@@ -276,15 +283,15 @@ export async function scanCandidates(
 }
 
 /**
- * Evaluate ONE pool against the Phase 2/3 gates (same FDV-proxy rule).
- * Used to pin the currently-tracked pool into the scan set: it costs
- * one getPool + per-token getToken call and keeps a faded-volume pool
- * eligible on gates rather than on volume rank.
+ * Evaluate ONE pool against the Phase 2/3 gates. Costs one DexPaprika
+ * getPool call plus batched DEX Screener enrichment, and keeps a
+ * faded-volume pool eligible on gates rather than on volume rank.
  */
 export async function classifyPoolByAddress(
   paprika: DexPaprikaData,
   poolAddress: string,
   marketCapProvider?: MarketCapProvider | null,
+  screener?: DexScreenerData | null,
   nowMs = Date.now(),
 ): Promise<{ candidates: WatchCandidate[]; enriched: boolean }> {
   let tokens: CandidateToken[];
@@ -311,9 +318,15 @@ export async function classifyPoolByAddress(
   } catch {
     return { candidates: [], enriched: false };
   }
-  const withCaps = marketCapProvider
-    ? await enrichMarketCaps(marketCapProvider, tokens, paprika.network)
-    : tokens;
+  const withCaps =
+    marketCapProvider && tokens.length > 0
+      ? await enrichFromScreener(
+          marketCapProvider,
+          screener ?? new DexScreenerData("solana"),
+          tokens,
+          paprika.network,
+        )
+      : tokens;
   const found: WatchCandidate[] = [];
   for (const token of withCaps) {
     const hit = classifyEligibility(token, nowMs);

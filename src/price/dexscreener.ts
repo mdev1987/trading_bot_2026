@@ -13,6 +13,23 @@ export type PriceUpdateHandler = (
   updates: PriceUpdate[],
 ) => void | Promise<void>;
 
+const fmtWindow = (v: number | null): string => (v === null ? "n/a" : `${v >= 0 ? "+" : ""}${v.toFixed(2)}%`);
+
+/**
+ * Multi-window momentum line from one Screener snapshot — the MTF
+ * context the plan-limited DexPaprika 5m/1h candles cannot provide
+ * (they 403). Pure, zero network.
+ */
+export function formatScreenerContext(update: PriceUpdate): string {
+  return (
+    `MTF m5:${fmtWindow(update.priceChangeM5Pct)} ` +
+    `h1:${fmtWindow(update.priceChangeH1Pct)} ` +
+    `h6:${fmtWindow(update.priceChangeH6Pct)} ` +
+    `h24:${fmtWindow(update.priceChangeH24Pct)} ` +
+    `(DEX Screener, ${update.dexId ?? "?"})`
+  );
+}
+
 export interface DexScreenerPriceTrackerOptions {
   intervalMs?: number;
   maxTokens?: number;

@@ -83,4 +83,20 @@ describe("DexScreenerData pair selection", () => {
     const snaps = await new DexScreenerData().getTokenSnapshots(["MINT"]);
     expect(snaps.get("MINT")!.marketCapUsd).toBeNull();
   });
+
+  test("maps volume, txns and multi-window changes", async () => {
+    stubFetch([
+      {
+        ...solPair(),
+        volume: { h24: 77_000 },
+        txns: { h24: { buys: 600, sells: 400 } },
+        priceChange: { m5: 0.5, h1: 1.5, h6: 2.5, h24: -3.5 },
+      },
+    ]);
+    const s = (await new DexScreenerData().getTokenSnapshots(["MINT"])).get("MINT")!;
+    expect(s.volume24hUsd).toBe(77_000);
+    expect(s.txns24h).toBe(1_000);
+    expect(s.priceChangeM5Pct).toBe(0.5);
+    expect(s.priceChangeH24Pct).toBe(-3.5);
+  });
 });

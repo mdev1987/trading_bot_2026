@@ -37,3 +37,4 @@ data/
 # Finder (MacOS) folder config
 .DS_Store
 doc/
+REPORT.md
