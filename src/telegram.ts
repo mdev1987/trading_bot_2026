@@ -246,6 +246,42 @@ export function paperStopMessage(r: StopReport): string {
   );
 }
 
+export interface ScanReport {
+  at: string;
+  scannedPools: number;
+  enrichedPools: number;
+  candidates: {
+    symbol: string;
+    phase: string;
+    poolAddress: string;
+    volume24hUsd: number | null;
+    marketCapUsd: number | null;
+    marketCapSource: string;
+    pairAgeHours: number;
+  }[];
+  activeSymbol: string | null;
+  positionOpen: boolean;
+}
+
+export function paperScanMessage(r: ScanReport): string {
+  const lines = r.candidates.map((c, i) => {
+    const vol = c.volume24hUsd == null ? "n/a" : `$${Math.round(c.volume24hUsd).toLocaleString()}`;
+    const mcap =
+      c.marketCapUsd == null
+        ? "n/a"
+        : `~$${Math.round(c.marketCapUsd).toLocaleString()}${c.marketCapSource === "fdv-proxy" ? " (FDV proxy)" : ""}`;
+    return `${i + 1}. ${c.symbol} [${c.phase}] vol ${vol} | mcap ${mcap} | age ${(c.pairAgeHours / 24).toFixed(1)}d\n   \`${c.poolAddress}\``;
+  });
+  return (
+    `🔎 DISCOVERY SCAN — ${r.candidates.length} candidate${r.candidates.length === 1 ? "" : "s"}\n\n` +
+    (lines.length > 0 ? lines.join("\n") : "_no Phase 2/3 pools passed the filters_") +
+    `\n\n📡 Scanned ${r.scannedPools} pools (enriched ${r.enrichedPools})` +
+    `\n🎯 Tracking: ${r.activeSymbol ?? "none"}${r.positionOpen ? " (position OPEN — scan is report-only)" : " (flat — watchlist setups evaluated)"}` +
+    `\n📅 ${r.at}` +
+    `\n\n_mcap via FDV proxy unless stated — DexPaprika rarely reports memecoin market cap_`
+  );
+}
+
 export function paperCloseMessage(r: CloseReport): string {
   const icon = r.won ? "💰" : "🔴";
   const total = r.wins + r.losses;

@@ -10,11 +10,37 @@ function isQuoteToken(symbol: string): boolean {
   return QUOTE_SYMBOLS.has(symbol.trim().toUpperCase());
 }
 
+type PoolDetails = Awaited<ReturnType<DexPaprikaData["getPool"]>>;
+
+interface DetailStats {
+  volume_usd?: number | null;
+  txns?: number | null;
+}
+
+/** Pool-details fields used as fallback when a search row lacks them. */
+function detailFallbacks(pool: PoolDetails): {
+  createdAt: string;
+  volume24hUsd: number | null;
+  transactions24h: number | null;
+} {
+  const p = pool as unknown as {
+    created_at?: string | null;
+    ["24h"]?: DetailStats | null;
+  };
+  return {
+    createdAt: p.created_at ?? "",
+    volume24hUsd: p["24h"]?.volume_usd ?? null,
+    transactions24h: p["24h"]?.txns ?? null,
+  };
+}
+
 export async function enrichPool(
   paprika: DexPaprikaData,
   poolRow: SearchPool,
+  prefetched?: PoolDetails,
 ): Promise<CandidateToken[]> {
-  const pool = await paprika.getPool(poolRow.id);
+  const pool = prefetched ?? (await paprika.getPool(poolRow.id));
+  const fb = detailFallbacks(pool);
 
   const candidates: CandidateToken[] = [];
 
@@ -46,16 +72,16 @@ export async function enrichPool(
       // Phase 2/3 classifiers reject null by design.
       marketCapUsd: details.market_cap ?? null,
 
-      poolCreatedAt: poolRow.created_at,
+      poolCreatedAt: poolRow.created_at ?? fb.createdAt,
 
       priceUsd: details.summary?.price_usd ?? poolRow.price_usd ?? null,
 
       liquidityUsd:
         details.summary?.liquidity_usd ?? poolRow.liquidity_usd ?? null,
 
-      volume24hUsd: poolRow.volume_usd_24h ?? null,
+      volume24hUsd: poolRow.volume_usd_24h ?? fb.volume24hUsd,
 
-      transactions24h: poolRow.transactions_24h ?? null,
+      transactions24h: poolRow.transactions_24h ?? fb.transactions24h,
 
       priceChange5m: poolRow.price_change_percentage_5m ?? null,
 

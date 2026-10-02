@@ -19,6 +19,10 @@ const loop = new LivePaperLoop(
     targets: strategyConfig.targets.map((t) => ({ ...t })),
     pollMs: paperConfig.pollMs,
     paths: { ...config.paths },
+    scanIntervalMs: paperConfig.scanIntervalMs,
+    watchlistSize: paperConfig.watchlistSize,
+    scanPoolsPerWindow: paperConfig.scanPoolsPerWindow,
+    scanEnrichCap: paperConfig.scanEnrichCap,
   },
   config.jupiter.apiKey,
 );

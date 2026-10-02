@@ -5,6 +5,7 @@ import { JSONFile } from "lowdb/node";
 import { DuckDBInstance, type DuckDBConnection } from "@duckdb/node-api";
 import type { PaperPosition, PaperTrade } from "./account";
 import type { Position as StrategyPosition } from "../strategy/position";
+import type { WatchCandidate } from "../discovery/scan";
 
 export interface SerializedPaperPosition extends Omit<PaperPosition, "tokenAmountRaw" | "originalTokenAmountRaw"> {
   tokenAmountRaw: string;
@@ -13,6 +14,11 @@ export interface SerializedPaperPosition extends Omit<PaperPosition, "tokenAmoun
 
 export interface SerializedPaperTrade extends Omit<PaperTrade, "tokenAmountRaw"> {
   tokenAmountRaw: string;
+}
+
+export interface ActivePool {
+  poolAddress: string;
+  tokenMint: string;
 }
 
 export interface PersistedState {
@@ -24,6 +30,12 @@ export interface PersistedState {
   trades: SerializedPaperTrade[];
   stats: { trades: number; wins: number; losses: number };
   lastProcessedCandle: string;
+  /** Multi-pool automation (optional until first scan; absent in v1 states). */
+  activePool?: ActivePool | null;
+  watchlist?: WatchCandidate[];
+  lastScanAt?: string;
+  /** Per-pool last processed closed candle (active pool mirrors lastProcessedCandle). */
+  candlesByPool?: Record<string, string>;
 }
 
 export interface LedgerRow {
@@ -57,6 +69,10 @@ const DEFAULT_STATE: PersistedState = {
   trades: [],
   stats: { trades: 0, wins: 0, losses: 0 },
   lastProcessedCandle: "",
+  activePool: null,
+  watchlist: [],
+  lastScanAt: "",
+  candlesByPool: {},
 };
 
 const num = (v: number): string => (Number.isFinite(v) ? String(v) : "NULL");

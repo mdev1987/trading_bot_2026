@@ -8,9 +8,18 @@ import { confirmSetup } from "../strategy/confirmation";
 import { createEntryDecision } from "../strategy/entry";
 import { createPosition, managePosition, type MonitorBar, type Position } from "../strategy/position";
 import { assessSafety } from "../safety/assessment";
-import { getMarketContext, formatMarketContext } from "../market/mtf";
+import {
+  classifyPoolByAddress,
+  diffWatchlist,
+  mergePinned,
+  scanCandidates,
+  type WatchCandidate,
+} from "../discovery/scan";
 import type { Candle } from "../market/ohlcv";
+import { getPoolCandles } from "../market/ohlcv";
 import { config } from "../config";
+import type { SetupSignal } from "../strategy/setup";
+import type { EntryDecision } from "../strategy/entry";
 import {
   telegram,
   paperOpenMessage,
@@ -18,6 +27,7 @@ import {
   paperCloseMessage,
   paperStartMessage,
   paperStopMessage,
+  paperScanMessage,
   type TokenContext,
 } from "../telegram";
 
@@ -41,6 +51,15 @@ export interface LivePaperConfig {
   targets: { id: string; profitPct: number; sellFraction: number }[];
   pollMs: number;
   paths: { stateFile: string; ledgerFile: string };
+  scanIntervalMs: number;
+  watchlistSize: number;
+  scanPoolsPerWindow: number;
+  scanEnrichCap: number;
+}
+
+interface ActivePool {
+  poolAddress: string;
+  tokenMint: string;
 }
 
 export class LivePaperLoop {
@@ -56,6 +75,14 @@ export class LivePaperLoop {
   private startedAt: string | null = null;
   private stopReason = "loop ended";
 
+  // Multi-pool automation: one tracked pool at a time (single-position
+  // account), hourly discovery scan refreshing the ranked watchlist.
+  private activePool: ActivePool;
+  private readonly tokenContexts = new Map<string, TokenContext>();
+  private watchlist: WatchCandidate[] = [];
+  private lastScanAt = "";
+  private candlesByPool: Record<string, string> = {};
+
   constructor(
     private readonly config: LivePaperConfig,
     jupiterApiKey: string | undefined,
@@ -63,6 +90,7 @@ export class LivePaperLoop {
     this.jupiter = new JupiterPaperBroker(jupiterApiKey ?? "");
     this.account = new PaperAccount(config.startingBalanceSol);
     this.store = new PaperStore(config.paths.stateFile, config.paths.ledgerFile);
+    this.activePool = { poolAddress: config.poolAddress, tokenMint: config.tokenMint };
   }
 
   async start(): Promise<void> {
@@ -88,7 +116,23 @@ export class LivePaperLoop {
       );
     }
 
-    this.token = await this.resolveTokenContext();
+    // Active pool: persisted rotation wins; an open position's pool wins
+    // over config (a restart must never orphan a live position); fresh
+    // boots fall back to the configured default pool.
+    this.activePool = persisted.activePool ?? (
+      this.strategyPosition
+        ? { poolAddress: this.strategyPosition.poolAddress, tokenMint: this.strategyPosition.tokenAddress }
+        : { poolAddress: this.config.poolAddress, tokenMint: this.config.tokenMint }
+    );
+    this.watchlist = persisted.watchlist ?? [];
+    this.lastScanAt = persisted.lastScanAt ?? "";
+    this.candlesByPool = persisted.candlesByPool ?? {};
+    const knownCandle = this.candlesByPool[this.activePool.poolAddress] ?? "";
+    if (!this.lastProcessedCandle && knownCandle) {
+      this.lastProcessedCandle = knownCandle;
+    }
+
+    this.token = await this.resolveTokenContext(this.activePool.poolAddress, this.activePool.tokenMint);
     this.running = true;
 
     console.log("================================");
@@ -96,12 +140,14 @@ export class LivePaperLoop {
     console.log("================================");
     console.log("Mode: paper-jupiter");
     console.log("Transactions: DISABLED");
-    console.log(`Pool: ${this.config.poolAddress}`);
+    console.log(`Pool: ${this.activePool.poolAddress}`);
     console.log(`Token: ${this.token.symbol} (${this.token.dex})`);
     console.log(`Interval: ${CANDLE_INTERVAL}`);
+    console.log(`Watchlist: ${this.watchlist.length} pools (scan every ${(this.config.scanIntervalMs / 3_600_000).toFixed(1)}h)`);
     console.log();
 
-    this.startedAt = new Date().toISOString();
+    const startedAt = new Date().toISOString();
+    this.startedAt = startedAt;
     this.stopReason = "loop ended";
     const snap = this.account.snapshot();
     await telegram(
@@ -118,15 +164,22 @@ export class LivePaperLoop {
         targets: this.config.targets.map((t) => ({ ...t })),
         resumed: (this.lastProcessedCandle ?? "") !== "" || this.strategyPosition !== null,
         openPositionSol: this.strategyPosition?.remainingSizeSol ?? snap.position?.remainingSizeSol ?? null,
-        startedAt: this.startedAt,
+        startedAt,
       }),
     )
       .then(() => console.log("Telegram start report sent"))
       .catch((e) => console.error("Telegram start report failed:", e));
 
+    // Boot scan seeds the watchlist immediately (report-only when a
+    // position is already open; rotation only happens while flat).
+    await this.runScan();
+
     while (this.running) {
       try {
         await this.tick();
+        if (this.scanDue()) {
+          await this.runScan();
+        }
       } catch (error) {
         console.error("Paper loop error:", error instanceof Error ? error.message : error);
       }
@@ -169,41 +222,129 @@ export class LivePaperLoop {
     return this.account.snapshot();
   }
 
-  private async resolveTokenContext(): Promise<TokenContext> {
+  private async resolveTokenContext(poolAddress: string, tokenMint: string): Promise<TokenContext> {
+    const cached = this.tokenContexts.get(poolAddress);
+    if (cached) return cached;
     const fallback: TokenContext = {
       name: "Unknown",
       symbol: "UNKNOWN",
       chain: this.paprika.network,
       dex: "unknown",
-      ca: this.config.tokenMint,
-      poolAddress: this.config.poolAddress,
+      ca: tokenMint,
+      poolAddress,
       liquidityUsd: null,
     };
     try {
-      const pool = await this.paprika.getPool(this.config.poolAddress);
+      const pool = await this.paprika.getPool(poolAddress);
       const dex = pool.dex_name ?? fallback.dex;
       const meme = (pool.tokens ?? []).find(
         (t) => !QUOTE_SYMBOLS.has((t.symbol ?? "").trim().toUpperCase()),
       );
-      return {
+      const ctx: TokenContext = {
         name: meme?.name ?? fallback.name,
         symbol: meme?.symbol ?? fallback.symbol,
         chain: this.paprika.network,
         dex,
-        ca: this.config.tokenMint,
-        poolAddress: this.config.poolAddress,
+        ca: tokenMint,
+        poolAddress,
         liquidityUsd: null,
       };
+      this.tokenContexts.set(poolAddress, ctx);
+      return ctx;
     } catch (error) {
       console.error("Token context lookup failed, using fallback:", error instanceof Error ? error.message : error);
       return fallback;
     }
   }
 
+  private scanDue(): boolean {
+    if (!this.lastScanAt) return true;
+    return Date.now() - Date.parse(this.lastScanAt) >= this.config.scanIntervalMs;
+  }
+
+  /** Hourly discovery scan: refresh the ranked watchlist, report to Telegram. */
+  private async runScan(): Promise<void> {
+    try {
+      const result = await scanCandidates(this.paprika, {
+        poolsPerWindow: this.config.scanPoolsPerWindow,
+        enrichCap: this.config.scanEnrichCap,
+        watchlistSize: this.config.watchlistSize,
+      });
+      // Pin the tracked pool: judged on gates, never on volume rank,
+      // so a faded-volume pool stays eligible for re-entry setups.
+      let pinned: WatchCandidate[] = [];
+      try {
+        const pin = await classifyPoolByAddress(this.paprika, this.activePool.poolAddress);
+        pinned = pin.candidates;
+        if (!pin.enriched) console.log(`SCAN pin: tracked pool lookup failed`);
+      } catch (error) {
+        console.error("SCAN pin failed:", error instanceof Error ? error.message : error);
+      }
+      const merged = mergePinned(result.candidates, pinned, this.config.watchlistSize);
+      const fresh = diffWatchlist(this.watchlist, merged);
+      this.watchlist = merged;
+      this.lastScanAt = result.at;
+      await this.store.save({ watchlist: this.watchlist, lastScanAt: this.lastScanAt });
+      const pinnedMark = new Set(pinned.map((c) => c.poolAddress));
+      console.log(
+        `SCAN ${result.at}: ${result.scannedPools} pools, ${result.enrichedPools} enriched, ` +
+        `${merged.length} candidates (${fresh.length} new, ${pinned.length} pinned)`,
+      );
+      for (const c of merged) {
+        console.log(
+          `  - ${c.tokenSymbol} [${c.phase}] vol=${Math.round(c.volume24hUsd ?? 0)} ` +
+          `mcap~${Math.round(c.marketCapUsd ?? 0)} (${c.marketCapSource}) age=${(c.pairAgeHours / 24).toFixed(1)}d` +
+          (pinnedMark.has(c.poolAddress) ? " 📌" : ""),
+        );
+      }
+      await telegram(
+        paperScanMessage({
+          at: result.at,
+          scannedPools: result.scannedPools,
+          enrichedPools: result.enrichedPools,
+          candidates: merged.map((c) => ({
+            symbol: c.tokenSymbol + (pinnedMark.has(c.poolAddress) ? " 📌" : ""),
+            phase: c.phase,
+            poolAddress: c.poolAddress,
+            volume24hUsd: c.volume24hUsd,
+            marketCapUsd: c.marketCapUsd,
+            marketCapSource: c.marketCapSource,
+            pairAgeHours: c.pairAgeHours,
+          })),
+          activeSymbol: this.token?.symbol ?? null,
+          positionOpen: this.strategyPosition !== null || this.account.openPosition !== null,
+        }),
+      ).catch((e) => console.error("Telegram scan report failed:", e));
+    } catch (error) {
+      console.error("Discovery scan failed:", error instanceof Error ? error.message : error);
+    }
+  }
+
+  /** Switch the tracked pool (flat only — never with a position open). */
+  private async switchActivePool(
+    poolAddress: string,
+    tokenMint: string,
+    enteredCandleTimeClose: string,
+  ): Promise<TokenContext> {
+    this.candlesByPool[this.activePool.poolAddress] = this.lastProcessedCandle;
+    this.activePool = { poolAddress, tokenMint };
+    this.lastProcessedCandle = enteredCandleTimeClose;
+    this.candlesByPool[poolAddress] = enteredCandleTimeClose;
+    const ctx = await this.resolveTokenContext(poolAddress, tokenMint);
+    this.token = ctx;
+    await this.store.save({
+      activePool: { ...this.activePool },
+      candlesByPool: { ...this.candlesByPool },
+      lastProcessedCandle: this.lastProcessedCandle,
+    });
+    console.log(`🔀 ROTATED tracking -> ${ctx.symbol} (${ctx.dex}) ${poolAddress}`);
+    return ctx;
+  }
+
   private async tick(): Promise<void> {
     // Relative window stays inside the plan's history (same form as the
     // working Module 6-10 calls). Absolute ISO ranges can 403.
-    const rows = await this.paprika.getPoolOHLCV(this.config.poolAddress, {
+    const rows = await this.paprika.getPoolOHLCV(this.activePool.poolAddress, {
       start: "-7d",
       interval: CANDLE_INTERVAL,
       limit: this.config.analysisWindowCandles,
@@ -243,12 +384,28 @@ export class LivePaperLoop {
 
     // A throw anywhere below leaves lastProcessedCandle untouched, so the
     // candle is retried next cycle instead of being silently skipped.
+    // Rotation may switch activePool inside processStrategy — the tail
+    // save must follow the pool whose candles were actually fetched.
+    const trackedPool = this.activePool.poolAddress;
     await this.processStrategy(candles, closed.close, monitor, isNewClosedCandle);
+
+    if (this.activePool.poolAddress !== trackedPool) {
+      // evaluateWatchlist rotated and already persisted the new pool's
+      // candle bookkeeping; the BUY line above has the entry details.
+      console.log(
+        `[${this.token?.symbol ?? "?"} ${this.lastProcessedCandle}] entered on rotation (was tracking ${trackedPool.slice(0, 8)})`,
+      );
+      return;
+    }
 
     if (isNewClosedCandle) {
       this.lastProcessedCandle = closed.time_close;
-      await this.store.save({ lastProcessedCandle: closed.time_close });
-      console.log(`[${closed.time_close}] close=$${closed.close.toFixed(8)}`);
+      this.candlesByPool[this.activePool.poolAddress] = closed.time_close;
+      await this.store.save({
+        lastProcessedCandle: closed.time_close,
+        candlesByPool: { ...this.candlesByPool },
+      });
+      console.log(`[${this.token?.symbol ?? "?"} ${closed.time_close}] close=$${closed.close.toFixed(8)}`);
     }
   }
 
@@ -278,25 +435,14 @@ export class LivePaperLoop {
     const token = this.token!;
     const analysis = analyzeMarket(candles, closedPrice, this.config.swingLookback, this.config.levelTolerancePct);
 
-    // Course-fidelity context (reporting only — strategy still trades m15):
-    // safety checklist (all-unknown until sources wired) + MTF trends.
-    // Fetched only on new closed candles to spare API credits.
+    // Safety checklist is local (no API cost). The old per-candle MTF
+    // fetch (5m/1h) always 403s on this plan, so it was dropped to free
+    // budget for discovery scans + watchlist setup checks (15m only).
     if (isNewClosedCandle) {
       const safety = assessSafety();
       console.log(
         `SAFETY decision=${safety.decision} (dev/snipers/insiders/bundles/holders/fees/dex/clusters/chart all ${safety.dev.status} — no sources wired)`,
       );
-      try {
-        const mtf = await getMarketContext(
-          this.paprika,
-          this.config.poolAddress,
-          this.config.swingLookback,
-          this.config.levelTolerancePct,
-        );
-        console.log(formatMarketContext(mtf));
-      } catch (error) {
-        console.error("MTF context failed:", error instanceof Error ? error.message : error);
-      }
     }
 
     // Manage an open strategy position on EVERY tick with the live monitor
@@ -324,7 +470,7 @@ export class LivePaperLoop {
             ? 1
             : Math.min(1, action.quantitySol / (proposal.position.originalSizeSol || action.quantitySol));
         const amount = this.account.plannedSellAmount(fraction);
-        const quote = await this.jupiter.quote(this.config.tokenMint, this.config.solMint, amount);
+        const quote = await this.jupiter.quote(this.activePool.tokenMint, this.config.solMint, amount);
         if (quote.transactionPresent) {
           throw new Error("Safety check failed: paper quote unexpectedly contains a transaction");
         }
@@ -339,7 +485,7 @@ export class LivePaperLoop {
           await this.account.sell(
             this.jupiter,
             this.config.solMint,
-            this.config.tokenMint,
+            this.activePool.tokenMint,
             fraction,
             action.price,
             action.reason,
@@ -357,9 +503,9 @@ export class LivePaperLoop {
             time: trade.time,
             side: "sell",
             tradeNo,
-            tokenMint: this.config.tokenMint,
+            tokenMint: this.activePool.tokenMint,
             tokenSymbol: token.symbol,
-            poolAddress: this.config.poolAddress,
+            poolAddress: this.activePool.poolAddress,
             dex: token.dex,
             chain: token.chain,
             requestedSol: trade.requestedSol,
@@ -389,6 +535,9 @@ export class LivePaperLoop {
                 wins: stats.wins + (won ? 1 : 0),
                 losses: stats.losses + (won ? 0 : 1),
               },
+              // The sell leg must persist here: this branch returns
+              // without reaching persistAccountAndStrategy below.
+              trades: snap.trades.map((t) => ({ ...t, tokenAmountRaw: t.tokenAmountRaw.toString() })),
             });
             const openedAt = proposal.position.openedAt;
             const closedAt = new Date().toISOString();
@@ -458,117 +607,206 @@ export class LivePaperLoop {
     // Entries only on NEW closed candles with no open position.
     // Jupiter quoted only on CONFIRMED.
     if (isNewClosedCandle && !this.strategyPosition && !this.account.openPosition) {
-      const setup = detectSetup(analysis, {
-        supportTolerancePct: this.config.supportTolerancePct,
-        breakoutPct: this.config.breakoutPct,
-      });
-      const confirmed = confirmSetup(setup, closedPrice);
-
-      if (confirmed.status !== "confirmed") {
-        console.log(`Setup: ${confirmed.type} ${confirmed.status} | balance=${this.account.balanceSol.toFixed(6)} SOL`);
-        return;
-      }
-
-      const entry = createEntryDecision(confirmed, this.account.balanceSol, {
-        riskPerTradePct: this.config.riskPerTradePct,
-        minPositionSol: this.config.minPositionSol,
-        maxPositionSol: this.config.maxPositionSol,
-      });
-
-      if (entry.status !== "ready") {
-        console.log(`Entry not ready: ${entry.reasons.join(",")}`);
-        return;
-      }
-
-      const balanceBefore = this.account.balanceSol;
-      const quote = await this.account.buy(
-        this.jupiter,
-        this.config.solMint,
-        this.config.tokenMint,
-        entry.positionSol,
+      const entered = await this.tryEnter(
+        this.activePool.poolAddress,
+        this.activePool.tokenMint,
+        token,
+        analysis,
+        candles.at(-1)!.timeClose,
         closedPrice,
-        "breakout-confirmed",
       );
-      const snap = this.account.snapshot();
-
-      this.strategyPosition = createPosition({
-        tokenAddress: this.config.tokenMint,
-        poolAddress: this.config.poolAddress,
-        entryPrice: entry.entryPrice,
-        positionSol: entry.positionSol,
-        stopPrice: entry.stopPrice,
-        targets: this.config.targets.map((t) => ({
-          id: t.id,
-          triggerPrice: entry.entryPrice * (1 + t.profitPct / 100),
-          sellFraction: t.sellFraction,
-        })),
-        openedAt: candles.at(-1)!.timeClose,
-      });
-
-      const tradeNo = this.store.state.stats.trades + 1;
-      await this.store.save({
-        balanceSol: snap.solBalance,
-        realizedPnlSol: snap.realizedPnlSol,
-        paperPosition: snap.position
-          ? {
-              ...snap.position,
-              tokenAmountRaw: snap.position.tokenAmountRaw.toString(),
-              originalTokenAmountRaw: snap.position.originalTokenAmountRaw.toString(),
-            }
-          : null,
-        strategyPosition: this.strategyPosition,
-        stats: { ...this.store.state.stats, trades: tradeNo },
-        trades: snap.trades.map((t) => ({ ...t, tokenAmountRaw: t.tokenAmountRaw.toString() })),
-      });
-      const trade = snap.trades.at(-1)!;
-      await this.store.recordTrade({
-        eventId: trade.eventId,
-        time: trade.time,
-        side: "buy",
-        tradeNo,
-        tokenMint: this.config.tokenMint,
-        tokenSymbol: token.symbol,
-        poolAddress: this.config.poolAddress,
-        dex: token.dex,
-        chain: token.chain,
-        requestedSol: trade.requestedSol,
-        actualSol: trade.actualSol,
-        tokenAmountRaw: trade.tokenAmountRaw.toString(),
-        marketPriceUsd: closedPrice,
-        router: trade.router,
-        priceImpactPct: trade.priceImpactPct,
-        requestId: trade.requestId,
-        reason: "breakout-confirmed",
-        balanceAfterSol: snap.solBalance,
-        realizedPnlSol: snap.realizedPnlSol,
-      });
-      await telegram(
-        paperOpenMessage({
-          token,
-          tradeNo,
-          setupType: confirmed.type,
-          entryPriceUsd: entry.entryPrice,
-          stopPriceUsd: entry.stopPrice,
-          triggerPriceUsd: confirmed.triggerPrice,
-          positionSol: entry.positionSol,
-          maxPositionSol: this.config.maxPositionSol,
-          balanceBeforeSol: balanceBefore,
-          balanceAfterSol: snap.solBalance,
-          router: trade.router,
-          priceImpactPct: trade.priceImpactPct,
-          requestId: trade.requestId,
-        }),
-      ).catch((e) => console.error("Telegram open report failed:", e));
-
-      console.log(
-        `PAPER BUY in=${quote.inAmount.toString()} out=${quote.outAmount.toString()} router=${quote.router ?? "?"} balance=${this.account.balanceSol.toFixed(6)} SOL`,
-      );
+      if (!entered && this.watchlist.length > 0) {
+        await this.evaluateWatchlist();
+      }
       return;
     }
 
     if (!isNewClosedCandle) return;
     console.log(
       `Paper balance: ${this.account.balanceSol.toFixed(6)} SOL | Position: ${this.account.openPosition ? `OPEN remaining=${this.account.openPosition.remainingSizeSol.toFixed(6)} SOL` : "NONE"}`,
+    );
+  }
+
+  /**
+   * Setup -> confirm -> entry-size -> paper BUY on one pool.
+   * Returns true when a position was opened. Pure strategy calls
+   * first; the Jupiter quote is the only side effect before commit.
+   */
+  private async tryEnter(
+    poolAddress: string,
+    tokenMint: string,
+    token: TokenContext,
+    analysis: ReturnType<typeof analyzeMarket>,
+    candleTimeClose: string,
+    closedPrice: number,
+  ): Promise<boolean> {
+    const setup = detectSetup(analysis, {
+      supportTolerancePct: this.config.supportTolerancePct,
+      breakoutPct: this.config.breakoutPct,
+    });
+    const confirmed = confirmSetup(setup, closedPrice);
+
+    if (confirmed.status !== "confirmed") {
+      if (poolAddress === this.activePool.poolAddress) {
+        console.log(`Setup: ${confirmed.type} ${confirmed.status} | balance=${this.account.balanceSol.toFixed(6)} SOL`);
+      }
+      return false;
+    }
+
+    const entry = createEntryDecision(confirmed, this.account.balanceSol, {
+      riskPerTradePct: this.config.riskPerTradePct,
+      minPositionSol: this.config.minPositionSol,
+      maxPositionSol: this.config.maxPositionSol,
+    });
+
+    if (entry.status !== "ready") {
+      console.log(`Entry not ready (${token.symbol}): ${entry.reasons.join(",")}`);
+      return false;
+    }
+
+    await this.executeBuy(poolAddress, tokenMint, token, candleTimeClose, closedPrice, confirmed, entry);
+    return true;
+  }
+
+  private async executeBuy(
+    poolAddress: string,
+    tokenMint: string,
+    token: TokenContext,
+    candleTimeClose: string,
+    closedPrice: number,
+    confirmed: SetupSignal,
+    entry: EntryDecision,
+  ): Promise<void> {
+    const balanceBefore = this.account.balanceSol;
+    const quote = await this.account.buy(
+      this.jupiter,
+      this.config.solMint,
+      tokenMint,
+      entry.positionSol,
+      closedPrice,
+      "breakout-confirmed",
+    );
+    const snap = this.account.snapshot();
+
+    this.strategyPosition = createPosition({
+      tokenAddress: tokenMint,
+      poolAddress,
+      entryPrice: entry.entryPrice,
+      positionSol: entry.positionSol,
+      stopPrice: entry.stopPrice,
+      targets: this.config.targets.map((t) => ({
+        id: t.id,
+        triggerPrice: entry.entryPrice * (1 + t.profitPct / 100),
+        sellFraction: t.sellFraction,
+      })),
+      openedAt: candleTimeClose,
+    });
+
+    const tradeNo = this.store.state.stats.trades + 1;
+    await this.store.save({
+      balanceSol: snap.solBalance,
+      realizedPnlSol: snap.realizedPnlSol,
+      paperPosition: snap.position
+        ? {
+            ...snap.position,
+            tokenAmountRaw: snap.position.tokenAmountRaw.toString(),
+            originalTokenAmountRaw: snap.position.originalTokenAmountRaw.toString(),
+          }
+        : null,
+      strategyPosition: this.strategyPosition,
+      stats: { ...this.store.state.stats, trades: tradeNo },
+      trades: snap.trades.map((t) => ({ ...t, tokenAmountRaw: t.tokenAmountRaw.toString() })),
+    });
+    const trade = snap.trades.at(-1)!;
+    await this.store.recordTrade({
+      eventId: trade.eventId,
+      time: trade.time,
+      side: "buy",
+      tradeNo,
+      tokenMint,
+      tokenSymbol: token.symbol,
+      poolAddress,
+      dex: token.dex,
+      chain: token.chain,
+      requestedSol: trade.requestedSol,
+      actualSol: trade.actualSol,
+      tokenAmountRaw: trade.tokenAmountRaw.toString(),
+      marketPriceUsd: closedPrice,
+      router: trade.router,
+      priceImpactPct: trade.priceImpactPct,
+      requestId: trade.requestId,
+      reason: "breakout-confirmed",
+      balanceAfterSol: snap.solBalance,
+      realizedPnlSol: snap.realizedPnlSol,
+    });
+    await telegram(
+      paperOpenMessage({
+        token,
+        tradeNo,
+        setupType: confirmed.type,
+        entryPriceUsd: entry.entryPrice,
+        stopPriceUsd: entry.stopPrice,
+        triggerPriceUsd: confirmed.triggerPrice,
+        positionSol: entry.positionSol,
+        maxPositionSol: this.config.maxPositionSol,
+        balanceBeforeSol: balanceBefore,
+        balanceAfterSol: snap.solBalance,
+        router: trade.router,
+        priceImpactPct: trade.priceImpactPct,
+        requestId: trade.requestId,
+      }),
+    ).catch((e) => console.error("Telegram open report failed:", e));
+
+    console.log(
+      `PAPER BUY ${token.symbol} in=${quote.inAmount.toString()} out=${quote.outAmount.toString()} router=${quote.router ?? "?"} balance=${this.account.balanceSol.toFixed(6)} SOL`,
+    );
+  }
+
+  /**
+   * Rotation: while flat, check each watchlist pool (15m, in-plan form)
+   * for a confirmed setup. First ready entry wins and becomes the
+   * tracked pool. Bounded by watchlist size to spare API credits.
+   */
+  private async evaluateWatchlist(): Promise<void> {
+    for (const candidate of this.watchlist) {
+      if (this.strategyPosition || this.account.openPosition) return;
+      if (candidate.poolAddress === this.activePool.poolAddress) continue;
+      let candles: Candle[];
+      try {
+        candles = await getPoolCandles(this.paprika, candidate.poolAddress, {
+          start: "-7d",
+          interval: CANDLE_INTERVAL,
+          limit: this.config.analysisWindowCandles,
+        });
+      } catch (error) {
+        console.error(`Watch ${candidate.tokenSymbol} candles failed:`, error instanceof Error ? error.message : error);
+        continue;
+      }
+      if (candles.length < 20) continue;
+      const last = candles.at(-1)!;
+      const analysis = analyzeMarket(candles, last.close, this.config.swingLookback, this.config.levelTolerancePct);
+      const token = await this.resolveTokenContext(candidate.poolAddress, candidate.tokenAddress);
+      let entered = false;
+      try {
+        entered = await this.tryEnter(
+          candidate.poolAddress,
+          candidate.tokenAddress,
+          token,
+          analysis,
+          last.timeClose,
+          last.close,
+        );
+      } catch (error) {
+        console.error(`Watch ${candidate.tokenSymbol} entry failed:`, error instanceof Error ? error.message : error);
+        continue;
+      }
+      if (entered) {
+        await this.switchActivePool(candidate.poolAddress, candidate.tokenAddress, last.timeClose);
+        return;
+      }
+    }
+    console.log(
+      `Paper balance: ${this.account.balanceSol.toFixed(6)} SOL | Position: NONE | watchlist: ${this.watchlist.length} checked, no entry`,
     );
   }
 }

@@ -20,4 +20,15 @@ export const paperConfig = {
   tokenMint: "6GmAFSYs4gk3FDao5FzzySQpPZaWsa4rUJHacpMpUNgx",
 
   solMint: "So11111111111111111111111111111111111111112",
+
+  /**
+   * Automated discovery: age-windowed DexPaprika scan (Phase 2/3 filters,
+   * FDV-as-mcap proxy explicitly labeled), volume-ranked watchlist.
+   * The loop keeps ONE position max: scans only rotate the tracked pool
+   * while flat; with a position open the scan is report-only.
+   */
+  scanIntervalMs: 3_600_000,
+  watchlistSize: 5,
+  scanPoolsPerWindow: 15,
+  scanEnrichCap: 12,
 } as const;
