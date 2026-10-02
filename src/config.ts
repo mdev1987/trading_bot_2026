@@ -24,6 +24,21 @@ export const config = {
     stateFile: process.env.PAPER_STATE_FILE ?? "state/paper-state.json",
     ledgerFile: process.env.LEDGER_FILE ?? "data/trades.duckdb",
   },
+
+  solana: {
+    // Shyft authenticated RPC wins when configured (its URL carries a
+    // trailing `api_key=` expecting the key); otherwise fall back to an
+    // explicit override or the public endpoint.
+    rpcUrl:
+      process.env.SHYFT_API_KEY && process.env.SHYFT_RPC_URL
+        ? `${process.env.SHYFT_RPC_URL}${process.env.SHYFT_API_KEY}`
+        : (process.env.SOLANA_RPC_URL ?? "https://api.mainnet-beta.solana.com"),
+    wsUrl:
+      process.env.SHYFT_API_KEY && process.env.SHYFT_WS_URL
+        ? `${process.env.SHYFT_WS_URL}${process.env.SHYFT_API_KEY}`
+        : undefined,
+    shyftApiKey: process.env.SHYFT_API_KEY || undefined,
+  },
 } as const;
 
 export const tradingConfig = {

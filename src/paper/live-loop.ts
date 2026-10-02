@@ -8,6 +8,9 @@ import { confirmSetup } from "../strategy/confirmation";
 import { createEntryDecision } from "../strategy/entry";
 import { createPosition, managePosition, type MonitorBar, type Position } from "../strategy/position";
 import { assessSafety, type SafetyInput } from "../safety/gate";
+import { fetchSafetyInput } from "../safety/providers";
+import { entryPolicy } from "../safety/policy";
+import { formatSafetyReport } from "../safety/report";
 import {
   classifyPoolByAddress,
   diffWatchlist,
@@ -715,17 +718,12 @@ export class LivePaperLoop {
     closedPrice: number,
     candidate: WatchCandidate | null,
   ): Promise<boolean> {
+    // Course order, API-aware: eligibility (cached, free) and the
+    // structure setup (have candles, free) come first; safety providers
+    // are only queried when a setup actually CONFIRMS.
     if (!candidate || candidate.eligibility !== "ready") {
       console.log(
         `ENTRY BLOCKED (${token.symbol}): eligibility=BLOCKED — ${candidate?.eligibilityReason ?? "pool not in eligible watchlist (market cap unavailable)"}`,
-      );
-      return false;
-    }
-
-    const safety = assessSafety(emptySafetyInput(tokenMint));
-    if (safety.decision !== "pass") {
-      console.log(
-        `ENTRY BLOCKED (${token.symbol}): safety=${safety.decision} — ${safety.reasons.slice(0, 3).join("; ")}`,
       );
       return false;
     }
@@ -743,10 +741,26 @@ export class LivePaperLoop {
       return false;
     }
 
+    // Real safety data: RPC holder concentration + DEX paid orders.
+    // Insiders/bundles/dev/snipers/clusters/fees/chart stay unknown.
+    const safety = assessSafety(await fetchSafetyInput(config.solana.rpcUrl, tokenMint));
+    const policy = entryPolicy(safety.decision);
+    const top10 = safety.top10HolderConcentration.value;
+    console.log(
+      `SAFETY-ENTRY ${token.symbol}: decision=${safety.decision} ` +
+        `top10=${top10 === null ? "unknown" : `${top10.toFixed(1)}%`} dexPaid=${String(safety.dexPaid.value)} ` +
+        `-> ${policy.label}`,
+    );
+    if (!policy.allowed) {
+      console.log(`ENTRY BLOCKED (${token.symbol}): safety=${safety.decision} — ${safety.reasons.slice(0, 3).join("; ")}`);
+      return false;
+    }
+
     const entry = createEntryDecision(confirmed, this.account.balanceSol, {
       riskPerTradePct: this.config.riskPerTradePct,
       minPositionSol: this.config.minPositionSol,
-      maxPositionSol: this.config.maxPositionSol,
+      // Paper risk scaling: WATCH trades half size, PASS full size.
+      maxPositionSol: this.config.maxPositionSol * policy.sizeFraction,
     });
 
     if (entry.status !== "ready") {
@@ -755,6 +769,10 @@ export class LivePaperLoop {
     }
 
     await this.executeBuy(poolAddress, tokenMint, token, candleTimeClose, closedPrice, confirmed, entry);
+    await telegram(
+      `🛡️ Safety @ entry — ${token.symbol} (${safety.decision.toUpperCase()}, ${policy.label})\n\n` +
+        formatSafetyReport(safety),
+    ).catch((e) => console.error("Telegram safety report failed:", e));
     return true;
   }
 
