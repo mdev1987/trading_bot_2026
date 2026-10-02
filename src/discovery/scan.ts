@@ -1,5 +1,7 @@
 import type { DexPaprikaData } from "../dexpaprika";
 import { enrichPool } from "./tokens";
+import { enrichMarketCaps } from "./enrich-market-cap";
+import type { MarketCapProvider } from "../market-cap/provider";
 import { classifyPhase2, classifyPhase3 } from "../strategy/discovery";
 import { getAgeHours } from "../strategy/age";
 import { SRT_DISCOVERY } from "../strategy/config";
@@ -31,6 +33,11 @@ export interface ScanOptions {
   txns24hMin?: number;
   /** Ranked watchlist size (default 5). */
   watchlistSize?: number;
+  /**
+   * Real market-cap enrichment (DEX Screener, batched). Without it,
+   * every candidate stays BLOCKED — FDV is never substituted.
+   */
+  marketCapProvider?: MarketCapProvider | null;
 }
 
 export interface ScanResult {
@@ -77,6 +84,14 @@ export function classifyEligibility(
   }
   if (!phase) return null;
 
+  // Null mcap = unknown (data gap). A present mcap that failed the
+  // strict gates above = known-but-out-of-range (e.g. above the $10M
+  // Phase 3 ceiling). Different reasons, same BLOCKED outcome.
+  const reason =
+    token.marketCapUsd === null
+      ? "market cap unavailable"
+      : "real market cap outside Phase gates";
+
   return {
     candidate: {
       phase,
@@ -98,9 +113,9 @@ export function classifyEligibility(
       priceChange6h: token.priceChange6h,
       priceChange24h: token.priceChange24h,
     },
-    source: "unknown",
+    source: token.marketCapUsd === null ? "unknown" : "reported",
     eligibility: "blocked",
-    reason: "market cap unavailable",
+    reason,
   };
 }
 
@@ -190,26 +205,38 @@ export async function scanCandidates(
   }
 
   const rows = [...seen.values()].slice(0, enrichCap);
-  const found: WatchCandidate[] = [];
+  const allTokens: CandidateToken[] = [];
   let enrichedPools = 0;
   for (const row of rows) {
-    let tokens: CandidateToken[];
     try {
-      tokens = await enrichPool(paprika, row as Parameters<typeof enrichPool>[1]);
+      const tokens = await enrichPool(paprika, row as Parameters<typeof enrichPool>[1]);
       enrichedPools += 1;
+      allTokens.push(...tokens);
     } catch {
       continue;
     }
-    for (const token of tokens) {
-      const hit = classifyEligibility(token);
-      if (hit) {
-        found.push({
-          ...hit.candidate,
-          marketCapSource: hit.source,
-          eligibility: hit.eligibility,
-          eligibilityReason: hit.reason,
-        });
-      }
+  }
+
+  // One batched market-cap call for every collected token (≤30/request).
+  // Without a provider, marketCapUsd stays null and everything BLOCKED.
+  const withCaps = options.marketCapProvider
+    ? await enrichMarketCaps(
+        options.marketCapProvider,
+        allTokens,
+        paprika.network,
+      )
+    : allTokens;
+
+  const found: WatchCandidate[] = [];
+  for (const token of withCaps) {
+    const hit = classifyEligibility(token);
+    if (hit) {
+      found.push({
+        ...hit.candidate,
+        marketCapSource: hit.source,
+        eligibility: hit.eligibility,
+        eligibilityReason: hit.reason,
+      });
     }
   }
 
@@ -239,6 +266,7 @@ export async function scanCandidates(
 export async function classifyPoolByAddress(
   paprika: DexPaprikaData,
   poolAddress: string,
+  marketCapProvider?: MarketCapProvider | null,
   nowMs = Date.now(),
 ): Promise<{ candidates: WatchCandidate[]; enriched: boolean }> {
   let tokens: CandidateToken[];
@@ -265,8 +293,11 @@ export async function classifyPoolByAddress(
   } catch {
     return { candidates: [], enriched: false };
   }
+  const withCaps = marketCapProvider
+    ? await enrichMarketCaps(marketCapProvider, tokens, paprika.network)
+    : tokens;
   const found: WatchCandidate[] = [];
-  for (const token of tokens) {
+  for (const token of withCaps) {
     const hit = classifyEligibility(token, nowMs);
     if (hit) {
       found.push({

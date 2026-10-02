@@ -15,6 +15,8 @@ import {
   scanCandidates,
   type WatchCandidate,
 } from "../discovery/scan";
+import { DexScreenerMarketCap } from "../market-cap/dexscreener";
+import { DexScreenerPriceTracker, type PriceUpdate } from "../price/dexscreener";
 import type { Candle } from "../market/ohlcv";
 import { getPoolCandles } from "../market/ohlcv";
 import { config } from "../config";
@@ -104,6 +106,14 @@ export class LivePaperLoop {
   private lastScanAt = "";
   private candlesByPool: Record<string, string> = {};
 
+  // DEX Screener: real market-cap enrichment + 2s live prices.
+  // DexPaprika stays the discovery/metadata/OHLCV source.
+  private readonly marketCaps = new DexScreenerMarketCap();
+  private readonly priceTracker = new DexScreenerPriceTracker({ intervalMs: 2_000, maxTokens: 30 });
+  private readonly livePrices = new Map<string, PriceUpdate>();
+  /** Freshness window for trusting a tracker price over candle close. */
+  private static readonly LIVE_PRICE_MAX_AGE_MS = 30_000;
+
   constructor(
     private readonly config: LivePaperConfig,
     jupiterApiKey: string | undefined,
@@ -191,6 +201,13 @@ export class LivePaperLoop {
       .then(() => console.log("Telegram start report sent"))
       .catch((e) => console.error("Telegram start report failed:", e));
 
+    // Live price stream follows the active pool + watchlist (2s,
+    // batched, well inside the 300 req/min limit). Position stops and
+    // targets react to it; structure/setups stay on closed 15m candles.
+    this.priceTracker.start(this.trackedTokenMints(), async (updates) => {
+      for (const u of updates) this.livePrices.set(u.tokenAddress, u);
+    });
+
     // Boot scan seeds the watchlist immediately (report-only when a
     // position is already open; rotation only happens while flat).
     await this.runScan();
@@ -213,6 +230,22 @@ export class LivePaperLoop {
   stop(reason = "signal"): void {
     this.stopReason = reason;
     this.running = false;
+    this.priceTracker.stop();
+  }
+
+  /** Token mints the price tracker should follow right now. */
+  private trackedTokenMints(): string[] {
+    const mints = new Set<string>([this.activePool.tokenMint]);
+    for (const c of this.watchlist) mints.add(c.tokenAddress);
+    return [...mints];
+  }
+
+  /** Fresh live price for a token, or null when stale/absent. */
+  private livePriceUsd(tokenMint: string): number | null {
+    const update = this.livePrices.get(tokenMint);
+    if (!update || update.priceUsd === null) return null;
+    if (Date.now() - update.observedAt > LivePaperLoop.LIVE_PRICE_MAX_AGE_MS) return null;
+    return update.priceUsd;
   }
 
   private async sendStopReport(): Promise<void> {
@@ -290,12 +323,15 @@ export class LivePaperLoop {
         poolsPerWindow: this.config.scanPoolsPerWindow,
         enrichCap: this.config.scanEnrichCap,
         watchlistSize: this.config.watchlistSize,
+        marketCapProvider: this.marketCaps,
       });
-      // Pin the tracked pool: judged on gates, never on volume rank,
-      // so a faded-volume pool stays eligible for re-entry setups.
       let pinned: WatchCandidate[] = [];
       try {
-        const pin = await classifyPoolByAddress(this.paprika, this.activePool.poolAddress);
+        const pin = await classifyPoolByAddress(
+          this.paprika,
+          this.activePool.poolAddress,
+          this.marketCaps,
+        );
         pinned = pin.candidates;
         if (!pin.enriched) console.log(`SCAN pin: tracked pool lookup failed`);
       } catch (error) {
@@ -306,6 +342,7 @@ export class LivePaperLoop {
       this.watchlist = merged;
       this.lastScanAt = result.at;
       await this.store.save({ watchlist: this.watchlist, lastScanAt: this.lastScanAt });
+      this.priceTracker.updateTokens(this.trackedTokenMints());
       const pinnedMark = new Set(pinned.map((c) => c.poolAddress));
       console.log(
         `SCAN ${result.at}: ${result.scannedPools} pools, ${result.enrichedPools} enriched, ` +
@@ -358,6 +395,7 @@ export class LivePaperLoop {
     this.candlesByPool[poolAddress] = enteredCandleTimeClose;
     const ctx = await this.resolveTokenContext(poolAddress, tokenMint);
     this.token = ctx;
+    this.priceTracker.updateTokens(this.trackedTokenMints());
     await this.store.save({
       activePool: { ...this.activePool },
       candlesByPool: { ...this.candlesByPool },
@@ -402,11 +440,13 @@ export class LivePaperLoop {
       volume: r.volume,
     }));
 
-    // Live monitor bar: forming candle when present, else the closed candle.
-    // Stops/targets react to intrabar wicks; entries still need closed closes.
+    // Live monitor bar: DEX Screener 2s price when fresh (stops/targets
+    // react in seconds, not per 15s poll), else the forming/closed candle.
+    // Entries still need closed closes; wicks stay candle-based.
+    const live = this.livePriceUsd(this.activePool.tokenMint);
     const monitor: MonitorBar = lastIsForming
-      ? { price: lastRow.close, high: lastRow.high, low: lastRow.low }
-      : { price: closed.close, high: closed.high, low: closed.low };
+      ? { price: live ?? lastRow.close, high: lastRow.high, low: lastRow.low }
+      : { price: live ?? closed.close, high: closed.high, low: closed.low };
 
     // A throw anywhere below leaves lastProcessedCandle untouched, so the
     // candle is retried next cycle instead of being silently skipped.

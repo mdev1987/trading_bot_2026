@@ -81,9 +81,12 @@ describe("classifyEligibility (FDV never satisfies market cap)", () => {
     expect(classifyEligibility(ancient)?.eligibility).toBe("blocked");
     expect(classifyEligibility(ancient)?.candidate.phase).toBe("phase3");
     const rich = { ...ancient, marketCapUsd: 50_000_000 };
-    // Strict Phase 3 rejects >$10M; only the age-compatible BLOCKED label remains.
-    expect(classifyEligibility(rich)?.eligibility).toBe("blocked");
-    expect(classifyEligibility(rich)?.candidate.phase).toBe("phase3");
+    // Strict Phase 3 rejects >$10M; BLOCKED with an honest reason, not "unavailable".
+    const hit = classifyEligibility(rich);
+    expect(hit?.eligibility).toBe("blocked");
+    expect(hit?.candidate.phase).toBe("phase3");
+    expect(hit?.reason).toBe("real market cap outside Phase gates");
+    expect(hit?.source).toBe("reported");
   });
 
   test("fresh pool rejected entirely", () => {

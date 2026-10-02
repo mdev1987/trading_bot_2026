@@ -1,6 +1,21 @@
+export interface MarketCapResult {
+  marketCapUsd: number | null;
+  fdvUsd: number | null;
+
+  source: "dexscreener" | "unknown";
+
+  pairAddress: string | null;
+  dexId: string | null;
+
+  /**
+   * True when DEX Screener supplied a usable market-cap value.
+   */
+  verified: boolean;
+}
+
 export interface MarketCapProvider {
-  getMarketCapUsd(
+  getMarketCaps(
     network: string,
-    tokenAddress: string,
-  ): Promise<number | null>;
+    tokenAddresses: string[],
+  ): Promise<Map<string, MarketCapResult>>;
 }
