@@ -16,6 +16,7 @@ import {
   diffWatchlist,
   mergePinned,
   scanCandidates,
+  shouldReportScan,
   type WatchCandidate,
 } from "../discovery/scan";
 import { DexScreenerMarketCap } from "../market-cap/dexscreener";
@@ -110,6 +111,7 @@ export class LivePaperLoop {
   private readonly tokenContexts = new Map<string, TokenContext>();
   private watchlist: WatchCandidate[] = [];
   private lastScanAt = "";
+  private lastScanReportAt: number | null = null;
   private candlesByPool: Record<string, string> = {};
 
   // DEX Screener: real market-cap enrichment + 2s live prices.
@@ -322,7 +324,7 @@ export class LivePaperLoop {
     return Date.now() - Date.parse(this.lastScanAt) >= this.config.scanIntervalMs;
   }
 
-  /** Hourly discovery scan: refresh the ranked watchlist, report to Telegram. */
+  /** Periodic discovery scan: refresh the ranked watchlist, Telegram on change. */
   private async runScan(): Promise<void> {
     try {
       const result = await scanCandidates(this.paprika, {
@@ -345,6 +347,7 @@ export class LivePaperLoop {
       }
       const merged = mergePinned(result.candidates, pinned, this.config.watchlistSize);
       const fresh = diffWatchlist(this.watchlist, merged);
+      const report = shouldReportScan(this.watchlist, merged, this.lastScanReportAt);
       this.watchlist = merged;
       this.lastScanAt = result.at;
       await this.store.save({ watchlist: this.watchlist, lastScanAt: this.lastScanAt });
@@ -363,27 +366,35 @@ export class LivePaperLoop {
           (pinnedMark.has(c.poolAddress) ? " 📌" : ""),
         );
       }
-      await telegram(
-        paperScanMessage({
-          at: result.at,
-          scannedPools: result.scannedPools,
-          enrichedPools: result.enrichedPools,
-          candidates: merged.map((c) => ({
-            symbol: c.tokenSymbol + (pinnedMark.has(c.poolAddress) ? " 📌" : ""),
-            phase: c.phase,
-            poolAddress: c.poolAddress,
-            volume24hUsd: c.volume24hUsd,
-            marketCapUsd: c.marketCapUsd,
-            fdvUsd: c.fdvUsd,
-            marketCapSource: c.marketCapSource,
-            eligibility: c.eligibility,
-            eligibilityReason: c.eligibilityReason,
-            pairAgeHours: c.pairAgeHours,
-          })),
-          activeSymbol: this.token?.symbol ?? null,
-          positionOpen: this.strategyPosition !== null || this.account.openPosition !== null,
-        }),
-      ).catch((e) => console.error("Telegram scan report failed:", e));
+      // At 10-minute cadence the console logs every scan, but Telegram
+      // only pings on set changes (or the hourly heartbeat) — otherwise
+      // an identical re-scan would spam the chat 144 times a day.
+      if (report) {
+        this.lastScanReportAt = Date.now();
+        await telegram(
+          paperScanMessage({
+            at: result.at,
+            scannedPools: result.scannedPools,
+            enrichedPools: result.enrichedPools,
+            candidates: merged.map((c) => ({
+              symbol: c.tokenSymbol + (pinnedMark.has(c.poolAddress) ? " 📌" : ""),
+              phase: c.phase,
+              poolAddress: c.poolAddress,
+              volume24hUsd: c.volume24hUsd,
+              marketCapUsd: c.marketCapUsd,
+              fdvUsd: c.fdvUsd,
+              marketCapSource: c.marketCapSource,
+              eligibility: c.eligibility,
+              eligibilityReason: c.eligibilityReason,
+              pairAgeHours: c.pairAgeHours,
+            })),
+            activeSymbol: this.token?.symbol ?? null,
+            positionOpen: this.strategyPosition !== null || this.account.openPosition !== null,
+          }),
+        ).catch((e) => console.error("Telegram scan report failed:", e));
+      } else {
+        console.log(`SCAN report skipped (unchanged set, heartbeat not due)`);
+      }
     } catch (error) {
       console.error("Discovery scan failed:", error instanceof Error ? error.message : error);
     }

@@ -133,6 +133,24 @@ export function diffWatchlist(prev: WatchCandidate[], next: WatchCandidate[]): W
 }
 
 /**
+ * Report throttle for frequent scans: Telegram pings when the set
+ * changes (arrivals or departures) or the heartbeat is due — never
+ * on an identical re-scan. Pure — unit tested.
+ */
+export function shouldReportScan(
+  prev: WatchCandidate[],
+  next: WatchCandidate[],
+  lastReportAtMs: number | null,
+  nowMs = Date.now(),
+  heartbeatMs = 3_600_000,
+): boolean {
+  if (diffWatchlist(prev, next).length > 0) return true;
+  if (diffWatchlist(next, prev).length > 0) return true;
+  if (lastReportAtMs === null) return true;
+  return nowMs - lastReportAtMs >= heartbeatMs;
+}
+
+/**
  * Merge pinned pools (e.g. the currently-tracked pool) into a ranked
  * watchlist. Pinned pools that pass the gates are guaranteed a slot even
  * when the volume-ranked slice cut them — qualification is judged on

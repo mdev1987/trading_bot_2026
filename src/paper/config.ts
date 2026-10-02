@@ -27,7 +27,7 @@ export const paperConfig = {
    * The loop keeps ONE position max: scans only rotate the tracked pool
    * while flat; with a position open the scan is report-only.
    */
-  scanIntervalMs: 3_600_000,
+  scanIntervalMs: 600_000,
   watchlistSize: 5,
   scanPoolsPerWindow: 15,
   scanEnrichCap: 12,

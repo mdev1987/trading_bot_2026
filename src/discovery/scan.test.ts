@@ -4,6 +4,7 @@ import {
   diffWatchlist,
   mergePinned,
   rankCandidates,
+  shouldReportScan,
   type WatchCandidate,
 } from "./scan";
 import type { CandidateToken } from "../models";
@@ -109,6 +110,21 @@ describe("diffWatchlist", () => {
   test("returns only unseen pools", () => {
     const next = diffWatchlist([watch("a", 1)], [watch("a", 1), watch("b", 2)]);
     expect(next.map((c) => c.poolAddress)).toEqual(["b"]);
+  });
+});
+
+describe("shouldReportScan", () => {
+  const now = 1_000_000_000;
+  test("reports arrivals and departures", () => {
+    expect(shouldReportScan([watch("a", 1)], [watch("a", 1), watch("b", 2)], now, now)).toBe(true);
+    expect(shouldReportScan([watch("a", 1), watch("b", 2)], [watch("a", 1)], now, now)).toBe(true);
+  });
+  test("skips identical sets until the heartbeat", () => {
+    const same = [watch("a", 1)];
+    expect(shouldReportScan(same, same, now, now)).toBe(false);
+    expect(shouldReportScan(same, same, now - 3_599_999, now)).toBe(false);
+    expect(shouldReportScan(same, same, now - 3_600_000, now)).toBe(true);
+    expect(shouldReportScan(same, same, null, now)).toBe(true);
   });
 });
 
