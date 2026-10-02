@@ -26,13 +26,15 @@ export const config = {
   },
 
   solana: {
-    // Shyft authenticated RPC wins when configured (its URL carries a
-    // trailing `api_key=` expecting the key); otherwise fall back to an
-    // explicit override or the public endpoint.
+    // Authenticated RPC precedence: Helius > Shyft > explicit override
+    // > public endpoint. Each provider URL carries a trailing `api_key=`
+    // expecting its key.
     rpcUrl:
-      process.env.SHYFT_API_KEY && process.env.SHYFT_RPC_URL
-        ? `${process.env.SHYFT_RPC_URL}${process.env.SHYFT_API_KEY}`
-        : (process.env.SOLANA_RPC_URL ?? "https://api.mainnet-beta.solana.com"),
+      process.env.HELIUS_API_KEY && process.env.HELIUS_RPC_URL
+        ? `${process.env.HELIUS_RPC_URL}${process.env.HELIUS_API_KEY}`
+        : process.env.SHYFT_API_KEY && process.env.SHYFT_RPC_URL
+          ? `${process.env.SHYFT_RPC_URL}${process.env.SHYFT_API_KEY}`
+          : (process.env.SOLANA_RPC_URL ?? "https://api.mainnet-beta.solana.com"),
     wsUrl:
       process.env.SHYFT_API_KEY && process.env.SHYFT_WS_URL
         ? `${process.env.SHYFT_WS_URL}${process.env.SHYFT_API_KEY}`
