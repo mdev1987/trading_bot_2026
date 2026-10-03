@@ -250,6 +250,7 @@ export interface ScanReport {
   at: string;
   scannedPools: number;
   enrichedPools: number;
+  skippedMajors: number;
   candidates: {
     symbol: string;
     phase: string;
@@ -284,7 +285,7 @@ export function paperScanMessage(r: ScanReport): string {
   return (
     `🔎 DISCOVERY SCAN — ${r.candidates.length} candidate${r.candidates.length === 1 ? "" : "s"}\n\n` +
     (lines.length > 0 ? lines.join("\n") : "_no Phase 2/3 pools passed the filters_") +
-    `\n\n📡 Scanned ${r.scannedPools} pools (enriched ${r.enrichedPools})` +
+    `\n\n📡 Scanned ${r.scannedPools} pools (enriched ${r.enrichedPools}, ${r.skippedMajors} majors skipped)` +
     `\n🎯 Tracking: ${r.activeSymbol ?? "none"}${r.positionOpen ? " (position OPEN — scan is report-only)" : " (flat — watchlist setups evaluated)"}` +
     `\n📅 ${r.at}` +
     `\n\n_FDV is display-only context — only a real reported market cap unlocks entries_`

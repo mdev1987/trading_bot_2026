@@ -2,6 +2,8 @@ import { describe, expect, test } from "bun:test";
 import {
   classifyEligibility,
   diffWatchlist,
+  isAllMajorPool,
+  isExcludedMajor,
   mergePinned,
   rankCandidates,
   shouldReportScan,
@@ -125,6 +127,28 @@ describe("shouldReportScan", () => {
     expect(shouldReportScan(same, same, now - 3_599_999, now)).toBe(false);
     expect(shouldReportScan(same, same, now - 3_600_000, now)).toBe(true);
     expect(shouldReportScan(same, same, null, now)).toBe(true);
+  });
+});
+
+describe("major exclusion", () => {
+  test("matches majors case-insensitively, passes memecoins", () => {
+    expect(isExcludedMajor("usdg")).toBe(true);
+    expect(isExcludedMajor(" cbBTC ")).toBe(true);
+    expect(isExcludedMajor("STONK")).toBe(false);
+    expect(isExcludedMajor(null)).toBe(false);
+  });
+
+  test("all-major mint pools skip enrichment", () => {
+    const stablePair = {
+      tokens: [
+        { id: "So11111111111111111111111111111111111111112" },
+        { id: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v" },
+      ],
+    };
+    expect(isAllMajorPool(stablePair)).toBe(true);
+    expect(isAllMajorPool({ tokens: [{ id: "So11111111111111111111111111111111111111112" }, { id: "MEME" }] })).toBe(false);
+    expect(isAllMajorPool({ tokens: [] })).toBe(false);
+    expect(isAllMajorPool(null)).toBe(false);
   });
 });
 

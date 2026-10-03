@@ -47,10 +47,51 @@ export interface ScanResult {
   candidates: WatchCandidate[];
   scannedPools: number;
   enrichedPools: number;
+  skippedMajors: number;
   at: string;
 }
 
 const HOURS_AGO = (h: number): string => new Date(Date.now() - h * 3_600_000).toISOString();
+
+/**
+ * Quote-like majors that can never be memecoin revival plays: fiat
+ * stables and wrapped blue-chips. They eat top-volume scan slots with
+ * flickering vestigial-pair data (USDG $10M↔$3B between scans) yet can
+ * never clear the gates meaningfully — a sub-$10M stable is a corpse,
+ * not a setup. Excluded from window scans so enrich budget goes to
+ * real candidates. The tracked-pool pin bypasses this (gates decide).
+ */
+const EXCLUDED_MAJOR_SYMBOLS = new Set([
+  "USDC", "USDT", "USDG", "PYUSD", "DAI", "USDS", "FDUSD", "TUSD",
+  "USDD", "FRAX", "LUSD", "USDE",
+  "CBBTC", "WBTC", "BTC",
+  "WETH", "ETH",
+  "WSOL", "SOL",
+]);
+
+/** True for quote-like majors (case/whitespace-insensitive). Pure — unit tested. */
+export function isExcludedMajor(symbol: string | null | undefined): boolean {
+  if (!symbol) return false;
+  return EXCLUDED_MAJOR_SYMBOLS.has(symbol.trim().toUpperCase());
+}
+
+/** Certain major mints (filter rows carry mints, not symbols). */
+const MAJOR_MINTS = new Set([
+  "So11111111111111111111111111111111111111112", // WSOL
+  "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v", // USDC
+  "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB", // USDT
+]);
+
+interface PoolRowTokens {
+  id?: string;
+  tokens?: { id?: string | null }[] | null;
+}
+
+/** True when every token mint in the row is a known major (stable/stable, SOL/USDC...). Pure — unit tested. */
+export function isAllMajorPool(row: PoolRowTokens | null | undefined): boolean {
+  const mints = (row?.tokens ?? []).map((t) => t?.id).filter((id): id is string => !!id);
+  return mints.length > 0 && mints.every((m) => MAJOR_MINTS.has(m));
+}
 
 /**
  * Course-fidelity eligibility. The strict Phase classifiers run on the
@@ -225,14 +266,32 @@ export async function scanCandidates(
     }
   }
 
-  const rows = [...seen.values()].slice(0, enrichCap);
+  // All-major pools (stable/stable...) never enrich: no getPool spent.
+  // Other majors (PYUSD, cbBTC...) are dropped post-enrich by symbol.
+  let skippedMajors = 0;
+  const enrichable: PoolRow[] = [];
+  for (const row of seen.values()) {
+    if (enrichable.length >= enrichCap) break;
+    if (isAllMajorPool(row as PoolRowTokens)) {
+      skippedMajors += 1;
+      continue;
+    }
+    enrichable.push(row);
+  }
+
   const allTokens: CandidateToken[] = [];
   let enrichedPools = 0;
-  for (const row of rows) {
+  for (const row of enrichable) {
     try {
       const tokens = await enrichPool(paprika, row as Parameters<typeof enrichPool>[1]);
       enrichedPools += 1;
-      allTokens.push(...tokens);
+      for (const token of tokens) {
+        if (isExcludedMajor(token.tokenSymbol)) {
+          skippedMajors += 1;
+          continue;
+        }
+        allTokens.push(token);
+      }
     } catch {
       continue;
     }
@@ -278,6 +337,7 @@ export async function scanCandidates(
     candidates: rankCandidates([...byPool.values()], watchlistSize),
     scannedPools: seen.size,
     enrichedPools,
+    skippedMajors,
     at: new Date().toISOString(),
   };
 }

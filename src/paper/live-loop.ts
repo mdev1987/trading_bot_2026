@@ -357,6 +357,7 @@ export class LivePaperLoop {
       const pinnedMark = new Set(pinned.map((c) => c.poolAddress));
       console.log(
         `SCAN ${result.at}: ${result.scannedPools} pools, ${result.enrichedPools} enriched, ` +
+        `${result.skippedMajors} majors skipped, ` +
         `${merged.length} candidates (${fresh.length} new, ${pinned.length} pinned)`,
       );
       for (const c of merged) {
@@ -374,10 +375,11 @@ export class LivePaperLoop {
       if (report) {
         this.lastScanReportAt = Date.now();
         await telegram(
-          paperScanMessage({
-            at: result.at,
-            scannedPools: result.scannedPools,
-            enrichedPools: result.enrichedPools,
+        paperScanMessage({
+          at: result.at,
+          scannedPools: result.scannedPools,
+          enrichedPools: result.enrichedPools,
+          skippedMajors: result.skippedMajors,
             candidates: merged.map((c) => ({
               symbol: c.tokenSymbol + (pinnedMark.has(c.poolAddress) ? " 📌" : ""),
               phase: c.phase,

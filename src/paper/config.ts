@@ -29,7 +29,7 @@ export const paperConfig = {
    */
   scanIntervalMs: 600_000,
   watchlistSize: 5,
-  scanPoolsPerWindow: 15,
+  scanPoolsPerWindow: 25,
   scanEnrichCap: 12,
 
   /**
