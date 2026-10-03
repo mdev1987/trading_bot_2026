@@ -38,4 +38,10 @@ export const paperConfig = {
    * of strategy code.
    */
   enableRangeBreak: true,
+
+  /**
+   * Structural stop floor as a multiple of 14-candle mean true-range.
+   * Tighter stops sit inside noise (trade #4 died to a 0.3% wiggle).
+   */
+  atrStopFloorMultiplier: 1.0,
 } as const;

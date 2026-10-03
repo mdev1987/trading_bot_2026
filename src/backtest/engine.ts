@@ -3,6 +3,7 @@ import type { Candle } from "../market/ohlcv";
 import { analyzeMarket } from "../strategy/structure";
 import { detectSetup } from "../strategy/setup";
 import { confirmSetup } from "../strategy/confirmation";
+import { meanTrueRangePct } from "../strategy/momentum";
 import { createEntryDecision } from "../strategy/entry";
 import { createPosition, managePosition, type Position } from "../strategy/position";
 import type { BacktestConfig, BacktestResult, BacktestTrade } from "./types";
@@ -167,10 +168,18 @@ export function runBacktest(
         continue;
       }
 
+      // Volatility stop floor: structural stops inside ~1× ATR are
+      // wiggle-outs, not risk control. Fail closed on unknown ATR.
+      const floorMult = config.atrStopFloorMultiplier ?? 0;
+      const atrPct = floorMult > 0 ? meanTrueRangePct(window, 14) : null;
+      const minStopDistancePct =
+        floorMult > 0 ? (atrPct === null ? Number.POSITIVE_INFINITY : atrPct * floorMult) : undefined;
+
       const entry = createEntryDecision(confirmed, balance, {
         riskPerTradePct: config.riskPerTradePct,
         minPositionSol: config.minPositionSol,
         maxPositionSol: config.maxPositionSol,
+        minStopDistancePct,
       });
 
       if (entry.status !== "ready") {

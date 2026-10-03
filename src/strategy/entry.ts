@@ -21,6 +21,13 @@ export interface EntryOptions {
    * Minimum position size in SOL.
    */
   minPositionSol: number;
+
+  /**
+   * Noise floor for the structural stop, as % of entry (e.g. 1× recent
+   * ATR%). Stops tighter than this sit inside normal wiggles — the
+   * trade is skipped instead of sized. Unset/0 disables.
+   */
+  minStopDistancePct?: number;
 }
 
 export interface EntryDecision {
@@ -122,6 +129,20 @@ export function createEntryDecision(
   if (!(stopDistance > 0)) {
     reasons.push("invalid-stop-distance");
     return baseResult;
+  }
+
+  if (
+    options.minStopDistancePct !== undefined &&
+    options.minStopDistancePct > 0 &&
+    stopDistancePct < options.minStopDistancePct
+  ) {
+    reasons.push("stop-inside-noise");
+
+    return {
+      ...baseResult,
+      stopDistancePct,
+      reasons,
+    };
   }
 
   const riskBudgetSol = accountBalanceSol * (options.riskPerTradePct / 100);

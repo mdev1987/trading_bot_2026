@@ -56,6 +56,12 @@ export interface BacktestConfig {
    * the reversal/continuation baseline.
    */
   enableRangeBreak?: boolean;
+
+  /**
+   * Structural stop floor as a multiple of 14-candle mean true-range
+   * %. Stops inside the noise are skipped. Unset/0 disables.
+   */
+  atrStopFloorMultiplier?: number;
 }
 
 export interface BacktestTrade {

@@ -24,6 +24,7 @@ const loop = new LivePaperLoop(
     scanPoolsPerWindow: paperConfig.scanPoolsPerWindow,
     scanEnrichCap: paperConfig.scanEnrichCap,
     enableRangeBreak: paperConfig.enableRangeBreak,
+    atrStopFloorMultiplier: paperConfig.atrStopFloorMultiplier,
   },
   config.jupiter.apiKey,
 );

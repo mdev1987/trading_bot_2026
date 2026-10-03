@@ -21,6 +21,7 @@ import {
 } from "../discovery/scan";
 import { DexScreenerMarketCap } from "../market-cap/dexscreener";
 import { DexScreenerPriceTracker, formatScreenerContext, type PriceUpdate } from "../price/dexscreener";
+import { meanTrueRangePct } from "../strategy/momentum";
 import type { Candle } from "../market/ohlcv";
 import { getPoolCandles } from "../market/ohlcv";
 import { config } from "../config";
@@ -85,6 +86,7 @@ export interface LivePaperConfig {
   scanPoolsPerWindow: number;
   scanEnrichCap: number;
   enableRangeBreak: boolean;
+  atrStopFloorMultiplier: number;
 }
 
 interface ActivePool {
@@ -703,6 +705,7 @@ export class LivePaperLoop {
         this.activePool.tokenMint,
         token,
         analysis,
+        candles,
         candles.at(-1)!.timeClose,
         closedPrice,
         this.candidateFor(this.activePool.poolAddress),
@@ -725,22 +728,24 @@ export class LivePaperLoop {
   }
 
   /**
-   * Eligibility -> SAFETY -> setup -> confirm -> entry-size -> paper BUY.
-   * Returns true when a position was opened. FDV-proxy/age-compatible
-   * candidates and non-PASS safety never reach the strategy.
+   * Eligibility -> setup -> confirm -> momentum -> SAFETY -> entry-size
+   * -> paper BUY. Returns true when a position was opened. FDV-proxy /
+   * age-compatible candidates, red-tape momentum, and REJECT safety
+   * never reach execution.
    */
   private async tryEnter(
     poolAddress: string,
     tokenMint: string,
     token: TokenContext,
     analysis: ReturnType<typeof analyzeMarket>,
+    candles: Candle[],
     candleTimeClose: string,
     closedPrice: number,
     candidate: WatchCandidate | null,
   ): Promise<boolean> {
     // Course order, API-aware: eligibility (cached, free) and the
-    // structure setup (have candles, free) come first; safety providers
-    // are only queried when a setup actually CONFIRMS.
+    // structure setup (have candles, free) come first; network providers
+    // (Screener momentum, safety) are only queried on CONFIRMED setups.
     if (!candidate || candidate.eligibility !== "ready") {
       console.log(
         `ENTRY BLOCKED (${token.symbol}): eligibility=BLOCKED — ${candidate?.eligibilityReason ?? "pool not in eligible watchlist (market cap unavailable)"}`,
@@ -777,11 +782,19 @@ export class LivePaperLoop {
       return false;
     }
 
+    // Volatility stop floor: structural stops inside ~1× 14-candle ATR
+    // are wiggle-outs, not risk control. Fail closed on unknown ATR.
+    const floorMult = this.config.atrStopFloorMultiplier;
+    const atrPct = floorMult > 0 ? meanTrueRangePct(candles, 14) : null;
+    const minStopDistancePct =
+      floorMult > 0 ? (atrPct === null ? Number.POSITIVE_INFINITY : atrPct * floorMult) : undefined;
+
     const entry = createEntryDecision(confirmed, this.account.balanceSol, {
       riskPerTradePct: this.config.riskPerTradePct,
       minPositionSol: this.config.minPositionSol,
       // Paper risk scaling: WATCH trades half size, PASS full size.
       maxPositionSol: this.config.maxPositionSol * policy.sizeFraction,
+      minStopDistancePct,
     });
 
     if (entry.status !== "ready") {
@@ -923,6 +936,7 @@ export class LivePaperLoop {
           candidate.tokenAddress,
           token,
           analysis,
+          candles,
           last.timeClose,
           last.close,
           candidate,
